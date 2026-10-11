@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { HttpError } from "./errors.js";
 
 export interface Config {
+  databaseUrl?: string;
   logLevel?: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
   trustProxy?: string[];
   notificationWebhookUrl?: string;
@@ -31,16 +32,30 @@ export interface Config {
 }
 
 export async function loadConfig(): Promise<Config> {
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  if (process.env.DATABASE_URL !== undefined && !databaseUrl) throw new HttpError(500, "DATABASE_URL must not be empty");
+  if (databaseUrl) {
+    try { if (!["postgres:", "postgresql:"].includes(new URL(databaseUrl).protocol)) throw new Error(); }
+    catch { throw new HttpError(500, "DATABASE_URL must be a Postgres connection URL"); }
+  }
+  if (process.env.VERCEL === "1" && !databaseUrl) throw new HttpError(500, "DATABASE_URL is required on Vercel; local files cannot share login sessions across instances");
+  if (databaseUrl && process.env.NOTIFICATION_DELIVERY_ENABLED === "true") throw new HttpError(500, "Postgres notification delivery requires a durable worker; keep NOTIFICATION_DELIVERY_ENABLED=false");
   const logLevel = process.env.LOG_LEVEL?.trim() || "info";
   if (!["fatal", "error", "warn", "info", "debug", "trace", "silent"].includes(logLevel)) {
     throw new HttpError(500, "LOG_LEVEL must be fatal, error, warn, info, debug, trace or silent");
   }
   const trustProxy = (process.env.TRUST_PROXY ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
   const dataDir = resolve(process.env.DATA_DIR ?? "./data");
-  const approvedFile = resolve(process.env.APPROVED_VERSIONS_FILE ?? `${dataDir}/approved-versions.json`);
+  const approvedFile = process.env.APPROVED_VERSIONS_FILE;
+  const useBundledApprovals = process.env.VERCEL === "1" && approvedFile === undefined;
   let value: unknown;
   try {
-    value = JSON.parse(await readFile(approvedFile, "utf8"));
+    // A literal module-relative URL lets Vercel trace this read-only asset.
+    // Explicit overrides always win and fail closed; never fall back on read errors.
+    const contents = useBundledApprovals
+      ? await readFile(new URL("../data/approved-versions.json", import.meta.url), "utf8")
+      : await readFile(resolve(approvedFile ?? `${dataDir}/approved-versions.json`), "utf8");
+    value = JSON.parse(contents);
   } catch (error) {
     throw new HttpError(500, `Could not load approved versions file: ${error instanceof Error ? error.message : "invalid file"}`);
   }
@@ -59,11 +74,7 @@ export async function loadConfig(): Promise<Config> {
   if (Boolean(process.env.BOOTSTRAP_COORDINATOR_EMAIL?.trim()) !== Boolean(process.env.BOOTSTRAP_COORDINATOR_PASSWORD)) {
     throw new HttpError(500, "Configure both bootstrap coordinator email and password, or neither");
   }
-  const corsOrigins = (process.env.CORS_ORIGIN ?? "http://localhost:5173").split(",").map((origin) => origin.trim()).filter(Boolean);
-  if (!corsOrigins.length || corsOrigins.some((origin) => {
-    try { const url = new URL(origin); return !["http:", "https:"].includes(url.protocol) || url.origin !== origin; }
-    catch { return true; }
-  })) throw new HttpError(500, "CORS_ORIGIN must contain exact HTTP(S) origins without paths or wildcards");
+  const corsOrigins = parseCorsOrigins(process.env.CORS_ORIGIN ?? "http://localhost:5173");
   const notificationWebhookUrl = process.env.NOTIFICATION_WEBHOOK_URL?.trim() ?? "";
   const notificationWebhookSecret = process.env.NOTIFICATION_WEBHOOK_SECRET ?? "";
   const notificationDeliveryEnabled = process.env.NOTIFICATION_DELIVERY_ENABLED === "true";
@@ -74,6 +85,7 @@ export async function loadConfig(): Promise<Config> {
   }
   if (notificationDeliveryEnabled && (!notificationWebhookUrl || notificationWebhookSecret.length < 32)) throw new HttpError(500, "Enable notification delivery only with an HTTPS webhook and a secret of at least 32 characters");
   return {
+    ...(databaseUrl ? { databaseUrl } : {}),
     logLevel: logLevel as NonNullable<Config["logLevel"]>,
     trustProxy,
     notificationWebhookUrl, notificationWebhookSecret, notificationDeliveryEnabled,
@@ -103,4 +115,23 @@ export async function loadConfig(): Promise<Config> {
 export function requireGemini(config: Config): { apiKey: string; model: string } {
   if (!config.geminiApiKey) throw new HttpError(503, "GEMINI_API_KEY is not configured");
   return { apiKey: config.geminiApiKey, model: config.geminiModel };
+}
+
+// Normalize equivalent origin spellings without allowing paths or broadening hosts.
+export function parseCorsOrigins(value: string): string[] {
+  const message = "CORS_ORIGIN must be a comma-separated list of frontend HTTP(S) origins, " +
+    "for example https://frontend.example.com (no quotes, paths, credentials, queries, fragments or wildcards)";
+  const origins = value.split(",").map((entry) => {
+    const origin = entry.trim();
+    try {
+      if (!/^https?:\/\/[^/?#\\\s]+\/?$/i.test(origin) || origin.includes("*")) throw new Error();
+      const url = new URL(origin);
+      if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error();
+      return url.origin;
+    } catch {
+      // Do not echo the value: it could accidentally contain credentials.
+      throw new HttpError(500, message);
+    }
+  });
+  return [...new Set(origins)];
 }

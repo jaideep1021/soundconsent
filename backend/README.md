@@ -15,6 +15,92 @@ npm run dev
 
 `npm run build` compiles to `dist/`, `npm start` runs the compiled server, and `npm test` runs offline tests. Gemini credentials are required to ingest documents and run RAG, teach-back grading, grounding checks, and recorded-audio transcription. ElevenLabs credentials are used for speech and its Conversational AI agent.
 
+## Vercel deployment
+
+Use the Fastify framework preset, Root Directory `backend`, Node.js 24.x,
+and the default output directory. Do not add a `functions: { "src/app.ts": ... }`
+configuration: this project uses automatic Fastify entry-point detection, not an
+`api/` function. The existing `src/app.ts` request handler lazily initializes the
+shared app; `src/server.ts` remains the local/Docker listener.
+
+Remove `APPROVED_VERSIONS_FILE` from the Vercel environment to use the checked-in
+`data/approved-versions.json`. With `VERCEL=1`, a literal module-relative file read
+makes the asset traceable independently of the working directory and `DATA_DIR`.
+The existing study/version entries are unchanged. Changes require redeployment.
+An explicitly configured approval file takes precedence and must exist in the
+runtime; missing files, malformed JSON, and invalid shapes stop startup rather
+than falling back to another allow-list. Outside Vercel, the existing
+`APPROVED_VERSIONS_FILE` or `DATA_DIR/approved-versions.json` behavior is unchanged.
+Docker retains its empty default allow-list and read-only configuration mount.
+
+Set `CORS_ORIGIN` to the exact frontend origin (for example `https://frontend.example.com`,
+without surrounding quotes or a page path) and `PUBLIC_BASE_URL` to the public
+backend URL; configure provider and bootstrap credentials as described below.
+The Vercel dashboard settings have to be verified separately from local `.env`.
+
+**Postgres is required on Vercel.** Connect a Postgres database (for example Neon
+through Vercel Storage) to the **backend project only**, then verify `DATABASE_URL`
+is available to its Production deployment. Use the provider's pooled URL with its
+TLS parameters intact; the application does not disable certificate verification.
+Never place this URL in the frontend or a `VITE_*` variable. Use a separate database
+or branch for Preview rather than sharing production state with preview code.
+
+Keep `BOOTSTRAP_COORDINATOR_EMAIL` and `BOOTSTRAP_COORDINATOR_PASSWORD` configured
+for the first database-backed startup. The initial administrator is created only
+when the shared account list is empty; concurrent cold starts cannot create duplicates.
+After verifying login, remove both bootstrap variables and redeploy. Existing accounts
+remain in Postgres. Keep `CORS_ORIGIN=https://soundconsent.vercel.app` for the current
+frontend, and `NOTIFICATION_DELIVERY_ENABLED=false` (or unset).
+
+The first startup creates `soundconsent_state` and `soundconsent_audit` if absent,
+so the database role needs schema/table creation rights as well as SELECT, INSERT,
+UPDATE and sequence usage. Existing tables and records are never cleared at startup.
+Accounts, grants, documents, sessions, settings, and notification records use a
+shared JSONB snapshot. Audit records retain their hash-chained serialization in a
+separate table. Each request locks the shared state row, loads fresh state, and commits
+state and audit changes before a successful response is sent. Error responses roll
+back. Database failures never fall back to files. Login cookies therefore work across
+instances, and logout/revocation takes effect on subsequent requests everywhere.
+
+This first adapter deliberately serializes requests to preserve the existing service
+semantics, including revision checks and replay keys. It is intended for a small
+prototype: AI calls hold the lock, lock waits are bounded to 15 seconds, and a busy
+database returns 503. Larger workloads need normalized tables and narrower transaction
+boundaries. Startup verifies the full audit chain; that cost grows with audit history.
+Login throttles are still per-process; distributed rate limiting remains separate work.
+The in-process external notification worker is rejected in Postgres mode until a
+durable scheduled worker is implemented. In-app follow-up notifications still work.
+
+`DATA_DIR` is ignored for mutable storage in Postgres mode. Local/Docker deployments
+without `DATABASE_URL` retain their existing single-process file storage and approval
+mount. Vercel refuses to start without `DATABASE_URL` so it cannot silently return to
+instance-local sessions. The approved-version allow-list remains separate and unchanged.
+
+**Migration:** this creates a new empty database store; it does not import temporary
+Vercel files or local Docker records. Existing temporary cookies will require a new
+sign-in. If old records must be preserved, stop writers and back up the state and audit
+files together before arranging an explicit migration. Do not expect `/tmp` records
+to be recoverable across instances. Configure provider backups for the new database.
+
+### Postgres verification
+
+`npm run typecheck`, `npm test`, and `npm run build` cover local behavior. To include
+the real database integration test, set `POSTGRES_TEST_URL` to a **dedicated disposable
+local test database whose name ends in `_test`**, then run `npm test`. That test resets
+its SoundConsent tables and checks concurrent bootstrap, cross-instance cookies,
+concurrent writes, stale revisions, transaction rollback, logout, cold starts and audit
+tampering. Never point it at application data. Without the variable it is skipped.
+
+After deployment check `/health`, then sign in through the frontend and refresh the
+dashboard several times. `/api/auth/me`, `/api/documents`, and `/api/sessions` should
+remain 200 while signed in. Sign out and confirm the previous session is rejected.
+
+After committing the changes, redeploy the new commit (redeploying an older commit
+will not include this fix). Verify `/health` and a synthetic end-to-end flow.
+
+References: [Fastify on Vercel](https://vercel.com/docs/frameworks/backend/fastify)
+and [files in Vercel Functions](https://vercel.com/kb/guide/how-can-i-use-files-in-serverless-functions).
+
 ## Deploy with Docker
 
 Run these commands from `backend/` (or build from the repository root with `docker build -t soundconsent-backend ./backend`). The multi-stage image contains compiled application code and locked production dependencies, runs as UID/GID `1000:1000`, and excludes `.env`, saved state, audit logs, tests, and local dependencies from the final image.
@@ -214,3 +300,15 @@ The unified chat endpoint accepts `{ "message": "..." }` (1–5000 characters). 
 ### Spoken history
 
 `POST /sessions/:id/voice-transcript` accepts `{messages: [{id, role, content, timestamp}]}` for the authenticated review. Batches contain at most 100 messages; IDs deduplicate retries and content is redacted before storage. Snapshots expose `voiceTranscript` separately from processed `transcript`. Saving observed speech never grades, advances, or changes the review revision, and speech is not used as trusted AI context. The frontend merges both histories and avoids displaying matching processed turns twice. History remains visible after ending voice and reloading the page.
+
+### Troubleshooting startup: CORS_ORIGIN
+
+If runtime logs report `CORS_ORIGIN`, the function reached configuration validation;
+this is not the earlier missing approval-file error. In the backend project's Vercel
+Environment Variables, replace `CORS_ORIGIN` with the actual frontend origin, such as
+`https://frontend.example.com`. Do not paste `CORS_ORIGIN=`, quotation marks, a dashboard
+path, or `*` into the value field. Multiple explicitly trusted origins use commas.
+A single root slash is accepted and normalized; paths and credentials remain rejected.
+If saved as a Secret, Vercel cannot reveal the old value; replace it with the verified
+frontend origin. Redeploy after saving environment changes; existing deployments retain
+their previous environment. Keep the same-site cookie and durable-storage requirements above.

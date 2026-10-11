@@ -3,6 +3,8 @@ import { mkdir, readFile, appendFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { redactPii } from "./privacy.js";
 
+import type { PostgresDatabase } from "./postgres.js";
+
 interface AuditEvent {
   timestamp: string;
   event: string;
@@ -15,13 +17,14 @@ interface AuditEvent {
 export class AuditLog {
   private previousHash = "GENESIS";
   private queue: Promise<void> = Promise.resolve();
-  constructor(private readonly file: string) {}
+  constructor(private readonly file: string, private readonly database?: PostgresDatabase) {}
 
   async init(): Promise<void> {
-    await mkdir(dirname(this.file), { recursive: true });
+    if (!this.database) await mkdir(dirname(this.file), { recursive: true });
     try {
-      const content = await readFile(this.file, "utf8");
-      const lines = content.trimEnd().split("\n").filter(Boolean);
+      const lines = this.database ? await this.database.auditRecords()
+        : (await readFile(this.file, "utf8")).trimEnd().split("\n").filter(Boolean);
+      if (this.database && !lines.length && this.database.current().auditHead !== "GENESIS") throw new Error("audit head integrity check failed");
       if (lines.length) {
         let expectedPrevious = "GENESIS";
         for (const line of lines) {
@@ -31,6 +34,7 @@ export class AuditLog {
           }
           expectedPrevious = event.hash;
         }
+        if (this.database && expectedPrevious !== this.database.current().auditHead) throw new Error("audit head integrity check failed");
         this.previousHash = expectedPrevious;
       }
     } catch (error) {
@@ -40,20 +44,26 @@ export class AuditLog {
   }
 
   append(event: string, details: Record<string, unknown>, sessionId?: string): Promise<void> {
-    this.queue = this.queue.then(async () => {
+    const append = async () => {
       const redactedDetails = JSON.parse(redactPii(JSON.stringify(details))) as Record<string, unknown>;
       const base = {
         timestamp: new Date().toISOString(),
         event,
         ...(sessionId ? { sessionId } : {}),
         details: redactedDetails,
-        previousHash: this.previousHash,
+        previousHash: this.database ? this.database.current().auditHead : this.previousHash,
       };
       const hash = createHash("sha256").update(JSON.stringify(base)).digest("hex");
       const record: AuditEvent = { ...base, hash };
+      if (this.database) {
+        await this.database.appendAudit(JSON.stringify(record), hash);
+        return;
+      }
       await appendFile(this.file, `${JSON.stringify(record)}\n`, { mode: 0o600 });
       this.previousHash = hash;
-    });
+    };
+    if (this.database) return append();
+    this.queue = this.queue.then(append);
     return this.queue;
   }
 }

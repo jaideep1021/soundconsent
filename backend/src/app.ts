@@ -1,3 +1,6 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { PostgresDatabase, databaseUnavailable } from "./postgres.js";
+import { loadConfig } from "./config.js";
 import Fastify, { LogController, type FastifyRequest, type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
@@ -37,12 +40,42 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
   await app.register(multipart, {
     limits: { fileSize: 20 * 1024 * 1024, files: 1, fields: 5 },
   });
-  const store = options.store ?? new JsonStore(config.stateFile);
-  const audit = options.audit ?? new AuditLog(config.auditFile);
-  await store.init();
-  await audit.init();
+  if (config.databaseUrl && (options.store || options.audit)) throw new Error("Postgres cannot be combined with file store overrides");
+  if (config.databaseUrl && config.notificationDeliveryEnabled) throw new Error("Postgres requires an external notification worker");
+  const database = config.databaseUrl ? new PostgresDatabase(config.databaseUrl) : undefined;
+  const store = options.store ?? new JsonStore(config.stateFile, database);
+  const audit = options.audit ?? new AuditLog(config.auditFile, database);
   const auth = new AuthService(store, config);
-  await auth.init();
+  const initialize = async () => { await store.init(); await audit.init(); await auth.init(); };
+  try {
+    if (database) { await database.init(); await database.transaction(initialize); }
+    else await initialize();
+  } catch (error) { await database?.close(); throw error; }
+  if (database) {
+    const transactions = new WeakMap<FastifyRequest, Awaited<ReturnType<PostgresDatabase["begin"]>>>();
+    app.addHook("preHandler", (request, _reply, done) => {
+      void database.begin().then((tx) => {
+        transactions.set(request, tx);
+        database.run(tx, done);
+      }, () => done(databaseUnavailable()));
+    });
+    const finish = async (request: FastifyRequest, commit: boolean) => {
+      const tx = transactions.get(request);
+      if (!tx) return;
+      transactions.delete(request);
+      await database.finish(tx, commit);
+    };
+    app.addHook("onSend", async (request, reply, payload) => {
+      try { await finish(request, reply.statusCode < 400); }
+      catch { reply.removeHeader("Set-Cookie"); throw databaseUnavailable(); }
+      return payload;
+    });
+    app.addHook("onError", async (request, reply) => { reply.removeHeader("Set-Cookie"); await finish(request, false); });
+    app.addHook("onResponse", async (request) => { await finish(request, false); });
+    app.addHook("onTimeout", async (request) => { await finish(request, false); });
+    app.addHook("onRequestAbort", async (request) => { await finish(request, false); });
+    app.addHook("onClose", async () => { await database.close(); });
+  }
   const ai = options.ai ?? new GeminiProvider(config.geminiApiKey, config.geminiModel, config.geminiEmbeddingModel, config.geminiTranscriptionModel);
   const documents = new DocumentService(store, audit, ai, config.approvedVersions);
   const sessions = new SessionService(store, audit, ai);
@@ -440,4 +473,32 @@ function voiceOptions(request: FastifyRequest): MutationOptions {
   const body = request.body as Record<string, unknown>;
   if (typeof body.requestId !== "string" || !/^[A-Za-z0-9_-]{8,100}$/.test(body.requestId) || typeof body.expectedRevision !== "string" || !/^\d{1,10}$/.test(body.expectedRevision)) throw new HttpError(400, "Provide a unique requestId and the last known expectedRevision");
   return { key: body.requestId, revision: Number(body.expectedRevision) };
+}
+
+
+// Vercel's Fastify entry point. Keep createApp() as the shared app factory
+// so src/server.ts can continue running the same routes in Docker.
+let vercelAppPromise: Promise<FastifyInstance> | undefined;
+
+function getVercelApp(): Promise<FastifyInstance> {
+  if (!vercelAppPromise) {
+    vercelAppPromise = (async () => {
+      const config = await loadConfig();
+      const app = await createApp({ config });
+      await app.ready();
+      return app;
+    })().catch((error: unknown) => {
+      vercelAppPromise = undefined;
+      throw error;
+    });
+  }
+  return vercelAppPromise;
+}
+
+export default async function handler(
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  const app = await getVercelApp();
+  app.server.emit("request", request, response);
 }
