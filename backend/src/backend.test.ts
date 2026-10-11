@@ -30,7 +30,7 @@ class FakeAi implements AiProvider {
     return { summary: `This explains ${section.title}.`, question: `What does ${section.title} explain?` };
   }
   async grade(): Promise<boolean> { return this.grades.shift() ?? false; }
-  async answerQuestion(): Promise<GroundedAnswer> {
+  async answerQuestion(_question: string, _sections: ConsentSection[]): Promise<GroundedAnswer> {
     return { answer: "The form says visits happen monthly.", citations: ["Study Procedures"], requiresClinician: false };
   }
   async verifyAnswer(): Promise<boolean> { return true; }
@@ -130,9 +130,58 @@ test("Gemini grounding check replaces unsupported generated claims with the safe
     const answer = await provider.answerQuestion("Can I stop my medication?", [
       { id: "procedures", title: "Study Procedures", text: "Participant Name: Jane Smith\nThe visits happen monthly.", embedding: [1, 0] },
     ]);
-    assert.deepEqual(answer, { answer: "Please ask your doctor.", citations: [], requiresClinician: true });
+    assert.match(answer.answer, /don't have enough reliable information/);
+    assert.match(answer.answer, /clarify what to ask/);
+    assert.deepEqual(answer.citations, []);
+    assert.equal(answer.requiresClinician, true);
     assert.equal(call, 2);
     assert.ok(requestBodies.every((body) => !body.includes("Jane Smith")));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Gemini retains verified sensitive explanations and general information without source citations", async () => {
+  const originalFetch = globalThis.fetch;
+  const explanation = {
+    answer: "General information: personal circumstances can affect how study information applies to you. Which part would you like to clarify?",
+    citations: [],
+    requiresClinician: true,
+  };
+  const generated = [explanation, { supported: true }];
+  const requests: Array<{ systemInstruction: { parts: Array<{ text: string }> }; contents: Array<{ parts: Array<{ text: string }> }> }> = [];
+  globalThis.fetch = async (_input, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify(generated.shift()) }] } }] });
+  };
+  try {
+    const provider = new GeminiProvider("test-key", "test-model", "test-embedding");
+    assert.deepEqual(await provider.answerQuestion("What does this mean for my health?", []), explanation);
+    assert.equal(requests.length, 2, "Sensitive explanations must still be verified");
+    const verification = JSON.parse(requests[1]!.contents[0]!.parts[0]!.text);
+    assert.equal(verification.requiresClinician, true);
+    assert.deepEqual(verification.sections, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Gemini rejects fabricated citations before accepting an educational answer", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify({
+      answer: "The study covers every medical expense.", citations: ["Invented section"], requiresClinician: true,
+    }) }] } }] });
+  };
+  try {
+    const provider = new GeminiProvider("test-key", "test-model", "test-embedding");
+    const answer = await provider.answerQuestion("What expenses are covered?", []);
+    assert.match(answer.answer, /don't have enough reliable information/);
+    assert.deepEqual(answer.citations, []);
+    assert.equal(answer.requiresClinician, true);
+    assert.equal(calls, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -423,18 +472,54 @@ test("teach-back retries exactly once, flags the failure, and advances through s
   }
 });
 
-test("refuses unsupported questions and puts them in the coordinator report", async () => {
+test("preserves helpful sensitive answers, recommends doctor confirmation, and persists report flags", async () => {
   const data = await fixture();
   try {
     const ai = new FakeAi();
-    ai.answerQuestion = async () => ({ answer: "Please ask your doctor.", citations: [], requiresClinician: true });
+    const explanation = "The form says visits happen monthly. Your study team can clarify how to plan around your other care.";
+    ai.answerQuestion = async () => ({ answer: explanation, citations: ["Study Procedures"], requiresClinician: true });
     const service = new SessionService(data.store, data.audit, ai);
     const session = await service.start(data.document);
-    const result = await service.ask(session.session.id, "Can I take my other medicine?");
-    assert.equal(result.answer, "Please ask your doctor.");
+    const question = "How do monthly visits fit with my other care?";
+    const options = { key: "sensitive-question-retry", revision: 0 };
+    const result = await service.ask(session.session.id, question, options);
+    assert.ok(String(result.answer).startsWith(explanation));
+    assert.match(String(result.answer), /strongly recommend confirming.*with your doctor before acting/);
+    assert.match(String(result.answer), /flagged your question in your report/);
+    assert.deepEqual(result.citations, ["Study Procedures"]);
     assert.equal(result.requiresClinician, true);
-    const report = service.report(session.session.id);
-    assert.equal((report.outOfScopeQuestions as unknown[]).length, 1);
+    assert.deepEqual(await service.ask(session.session.id, question, options), result);
+    const restored = new JsonStore(join(data.directory, "state.json"));
+    await restored.init();
+    const report = new SessionService(restored, data.audit, ai).report(session.session.id);
+    const flags = report.outOfScopeQuestions as Array<{ question: string }>;
+    assert.equal(flags.length, 1);
+    assert.equal(flags[0]?.question, question);
+    assert.equal(restored.getSession(session.session.id)?.transcript?.at(-1)?.content, result.answer);
+    assert.match(await readFile(join(data.directory, "audit.jsonl"), "utf8"), /question.escalated/);
+  } finally {
+    await rm(data.directory, { recursive: true, force: true });
+  }
+});
+
+test("answers questions even when retrieval finds no matching source sections", async () => {
+  const data = await fixture();
+  try {
+    const ai = new FakeAi();
+    ai.embed = async () => [0, 0];
+    let answered = false;
+    ai.answerQuestion = async (_question, sections) => {
+      answered = true;
+      assert.deepEqual(sections, []);
+      return { answer: "I can help you prepare questions for your study team. Which topic would you like to discuss?", citations: [], requiresClinician: false };
+    };
+    const service = new SessionService(data.store, data.audit, ai);
+    const session = await service.start(data.document);
+    const result = await service.ask(session.session.id, "Can you help me prepare questions?");
+    assert.equal(answered, true);
+    assert.match(String(result.answer), /prepare questions/);
+    assert.equal(result.requiresClinician, false);
+    assert.deepEqual(service.report(session.session.id).outOfScopeQuestions, []);
   } finally {
     await rm(data.directory, { recursive: true, force: true });
   }
