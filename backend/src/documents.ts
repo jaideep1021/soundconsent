@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { PDFParse } from "pdf-parse";
+import { createPdfParser } from "./pdf.js";
 import { HttpError } from "./errors.js";
 import { extractDocumentVersion, extractTitle, splitIntoSections } from "./sections.js";
 import type { AiProvider, ConsentDocument } from "./types.js";
@@ -73,14 +74,12 @@ export class DocumentService {
       throw new HttpError(415, "Upload must be a PDF file");
     }
     if (!/^[A-Za-z0-9._-]{1,100}$/.test(input.studyId)) throw new HttpError(400, "Invalid studyId");
-let parser: PDFParse | undefined;
+    let parser: PDFParse | undefined;
 
-try {
-  const { PDFParse } = await import("pdf-parse");
-
-  parser = new PDFParse({ data: input.bytes });
-  const parsed = await parser.getText();
-  const info = await parser.getInfo();
+    try {
+      parser = await createPdfParser(input.bytes);
+      const parsed = await parser.getText();
+      const info = await parser.getInfo();
       const text = parsed.text.replace(/\u0000/g, "").trim();
       if (text.length < 40) throw new HttpError(422, "PDF contains no extractable consent text; scanned PDFs require OCR");
       const version = extractDocumentVersion(text);
