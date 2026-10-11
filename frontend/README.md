@@ -10,6 +10,46 @@ One React/TypeScript application using the backend for accounts, documents, revi
 
 The default API base is `/api`; Vite proxies it to `http://127.0.0.1:3001`. `API_PROXY_TARGET` overrides the proxy target. Deploy behind a same-origin `/api` reverse proxy, or same-site hosts with credentialed CORS and exact trusted origins in backend `CORS_ORIGIN`. `VITE_API_URL` can override the public API base. HttpOnly SameSite=Strict cookies do not support unrelated cross-site domains. Never put provider secrets, account passwords or coordinator keys in `VITE_*` variables.
 
+## Vercel deployment
+
+Create a separate Vercel project from the same GitHub repository. Keep the existing
+backend project rooted at `backend`.
+
+1. Commit `frontend/vercel.json` and this README and push when ready.
+2. In Vercel choose **Add New → Project**, import the soundconsent repository, and
+   name the project `soundconsent-frontend` (or another available name).
+3. Set **Root Directory** to `frontend`, **Framework Preset** to Vite,
+   **Node.js** to 24.x, **Build Command** to `npm run build`, and **Output Directory**
+   to `dist`. Install dependencies with `npm ci`.
+4. Set the frontend environment variable `VITE_API_URL=/api`. Do not put backend
+   API keys, bootstrap passwords, or other secrets in frontend variables.
+5. Deploy. The checked-in rewrites forward `/api/*` to
+   `https://soundconsent-backend.vercel.app/*` and serve the React app for page URLs
+   such as `/login` and `/dashboard`. Browser API requests stay on the frontend
+   origin, allowing the backend's host-only HttpOnly cookies to work through the proxy.
+6. Copy the actual assigned frontend origin (for example `https://YOUR-PROJECT.vercel.app`).
+   In the **backend** project, set `CORS_ORIGIN` to that exact origin and redeploy
+   the backend. Even with a same-origin proxy, the backend validates the browser's
+   Origin for login and mutations. Use a comma-separated list if retaining localhost;
+   do not allow all preview domains with a wildcard.
+7. Open the frontend `/api/health`: expect JSON `{"status":"ok"}`. Open `/login`,
+   sign in with the configured backend coordinator account, and refresh `/dashboard`
+   to verify both client routing and cookie persistence. Test an approved synthetic
+   PDF upload and session workflow before considering the deployment verified.
+
+If `/api/health` returns HTML, check the deployed commit includes `vercel.json` and
+that the API rewrite precedes the React fallback. If login returns 403, confirm the
+backend's deployed `CORS_ORIGIN` matches the frontend address in the browser. A 401
+from `/api/auth/me` before signing in is expected. Vercel deployment protection on
+the backend can block the proxy; check for a Vercel login page if API responses are
+unexpected HTML. Environment changes require a new deployment.
+
+The backend's `/tmp` storage is disposable and can lose accounts and reviews across
+instances/restarts. This frontend setup does not resolve that storage limitation.
+Use synthetic data until durable storage is implemented.
+
+[Vercel external rewrites](https://vercel.com/docs/routing/rewrites) provide the API proxy.
+
 ## Docker deployment
 
 Build from the repository root with **`frontend/` as the build context**:
