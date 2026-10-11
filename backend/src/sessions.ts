@@ -3,7 +3,7 @@ import { HttpError } from "./errors.js";
 import { redactPii } from "./privacy.js";
 import type { AuditLog } from "./audit.js";
 import { JsonStore } from "./store.js";
-import type { AiProvider, ConsentDocument, ReviewSession, MutationOptions } from "./types.js";
+import type { AiProvider, ConsentDocument, ReviewSession, MutationOptions, TranscriptEntry } from "./types.js";
 import { retrieveRelevant } from "./retrieval.js";
 
 export const HUMAN_HANDOFF = "I am an automated assistant, not a doctor. I can help explain this consent form, but I cannot provide medical advice or take your consent. A doctor or nurse will answer medical questions and discuss your final decision. You may ask for a human at any time.";
@@ -17,6 +17,21 @@ export class SessionService {
     private readonly audit: AuditLog,
     private readonly ai: AiProvider,
   ) {}
+
+  async saveVoiceTranscript(sessionId: string, messages: TranscriptEntry[]) {
+    return this.withSessionLock(sessionId, async () => {
+      const session = this.getSession(sessionId);
+      session.voiceTranscript ??= [];
+      for (const message of messages) {
+        if (!session.voiceTranscript.some((saved) => saved.id === message.id)) {
+          session.voiceTranscript.push({ id: message.id, role: message.role, content: redactPii(message.content), timestamp: message.timestamp });
+        }
+      }
+      // Observed speech is history, never a grading input or proof of completion.
+      // Preserve the review revision so transcript writes cannot stale a voice turn.
+      await this.store.saveSession(session);
+    });
+  }
 
   async start(document: ConsentDocument, creationKey?: string): Promise<{ session: ReviewSession; message: string; section: unknown }> {
     return this.withSessionLock("creation", async () => {
@@ -54,6 +69,35 @@ export class SessionService {
     await this.store.saveSession(session);
     await this.audit.append("assistant.guide", { section: document.sections[0]?.title, message }, session.id);
     return { session, message, section: this.sectionProgress(session, document) };
+    });
+  }
+
+  async message(sessionId: string, rawMessage: string, options: MutationOptions = {}): Promise<Record<string, unknown>> {
+    const message = redactPii(rawMessage.trim());
+    if (!message || rawMessage.trim().length > 5000) throw new HttpError(400, "Message must be between 1 and 5000 characters");
+    return this.mutate(sessionId, "message:" + rawMessage, options, async (session) => {
+      if (session.status === "completed") throw new HttpError(409, "Session is already complete");
+      // Preserve immediate handoffs even when the classifier is unavailable.
+      if (isEmergency(message) || isHumanRequest(message)) return { ...await this.respondLocked(session, message), intent: "question" };
+      const document = session.documentSnapshot ?? this.getDocument(session.documentId);
+      const section = document.sections[session.sectionIndex];
+      if (!section) throw new HttpError(500, "Current section is missing");
+      const intent = await this.ai.classifyMessage(message, {
+        section, guide: session.guide ?? null,
+        recentMessages: (session.transcript ?? []).slice(-6).map(({ role, content }) => ({ role, content: redactPii(content) })),
+      });
+      if (intent === "response") return { ...await this.respondLocked(session, message), intent };
+      if (intent === "question") {
+        const answer = await this.askLocked(session, message, 5000);
+        return { ...answer, intent, message: answer.answer, status: session.status, section: this.sectionProgress(session, document) };
+      }
+      if (intent !== "clarify") throw new HttpError(502, "Unable to understand message intent. Please try again.");
+      const reply = "Tell me what you understand about this section in your own words, or let me know what you would like me to explain.";
+      session.lastAssistantMessage = reply;
+      this.record(session, "patient", message);
+      this.record(session, "ai", reply);
+      await this.audit.append("message.clarification_requested", { message, response: reply }, session.id);
+      return { sessionId: session.id, intent, message: reply, status: session.status, section: this.sectionProgress(session, document) };
     });
   }
 
@@ -151,11 +195,11 @@ export class SessionService {
     return this.mutate(sessionId, "question:" + rawQuestion, options, (session) => this.askLocked(session, rawQuestion));
   }
 
-  private async askLocked(session: ReviewSession, rawQuestion: string): Promise<Record<string, unknown>> {
+  private async askLocked(session: ReviewSession, rawQuestion: string, maxLength = 2000): Promise<Record<string, unknown>> {
     const sessionId = session.id;
     if (session.status === "completed") throw new HttpError(409, "Session is already complete");
     const question = redactPii(rawQuestion.trim());
-    if (!question || question.length > 2000) throw new HttpError(400, "Question must be between 1 and 2000 characters");
+    if (!question || question.length > maxLength) throw new HttpError(400, `Question must be between 1 and ${maxLength} characters`);
     if (isEmergency(question)) {
       const answer = "If this is an emergency, call 911 now. Please ask your doctor about medical concerns.";
       session.outOfScopeQuestions.push({ question, askedAt: new Date().toISOString() });
@@ -210,6 +254,7 @@ export class SessionService {
         attemptsForCurrentSection: session.attemptsForCurrentSection,
         guide: session.guide ?? null,
         transcript: session.transcript ?? [], historyAvailable: session.transcript !== undefined && !session.historyIncomplete,
+        voiceTranscript: session.voiceTranscript ?? [],
         sections: document.sections.map(({ id, title, text }, index) => ({
           id, title, text,
           status: index < session.sectionIndex ? (session.results.find((r) => r.sectionId === id)?.passed ? "completed" : "needs-review") : index === session.sectionIndex ? "active" : "pending",

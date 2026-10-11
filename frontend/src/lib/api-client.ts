@@ -24,7 +24,7 @@ export function apiError(error: unknown): string {
 export const isUnauthorized = (error: unknown) => axios.isAxiosError(error) && error.response?.status === 401;
 
 apiClient.interceptors.response.use((response) => response, (error: unknown) => {
-  if (axios.isAxiosError(error) && error.response?.status === 401 && error.config?.url !== "/auth/login" && error.config?.url !== "/auth/me" && !error.config?.url?.endsWith("/access")) {
+  if (axios.isAxiosError(error) && error.response?.status === 401 && !error.config?.url?.startsWith("/patient/") && error.config?.url !== "/auth/login" && error.config?.url !== "/auth/me" && !error.config?.url?.endsWith("/access")) {
     queryClient.removeQueries({ queryKey: ["coordinator"] });
     queryClient.setQueryData(["auth"], null);
   }

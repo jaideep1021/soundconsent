@@ -6,6 +6,7 @@ import type { Account, AuthGrant, AuthState } from "./types.js";
 import { HttpError } from "./errors.js";
 
 const COORDINATOR_COOKIE = "sc_coordinator";
+const PATIENT_COOKIE = "sc_patient";
 const HOURS = 60 * 60 * 1000;
 export const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const patientCookie = (id: string) => `sc_review_${digest(id).slice(0, 16)}`;
@@ -60,6 +61,7 @@ export class AuthService {
     if (!token || token.length > 256) return;
     const grant = this.store.getAuth().grants.find((g) => g.hash === digest(token) && g.kind === kind && g.expiresAt > Date.now());
     if (!grant) return;
+    if (grant.patientId && !this.store.getAuth().patients?.some((p) => p.id === grant.patientId)) return;
     if (grant.accountId && !this.store.getAuth().accounts.some((a) => a.id === grant.accountId && !a.disabled)) return;
     if (grant.parentHash && !this.store.getAuth().grants.some((g) => g.hash === grant.parentHash && g.expiresAt > Date.now())) return;
     return grant;
@@ -89,7 +91,11 @@ export class AuthService {
     if (!this.canAccess(principal, studyId)) throw new HttpError(403, "Study access denied");
     return principal;
   }
-  session(request: FastifyRequest, id: string): { kind: "patient" | "coordinator"; grantHash?: string; accountId?: string } {
+  session(request: FastifyRequest, id: string): { kind: "patient" | "coordinator"; grantHash?: string; accountId?: string; patientId?: string } {
+    const patient = this.patientPrincipal(request);
+    if (patient && this.store.getAuth().memberships?.some((m) => m.patientId === patient.user.id && m.sessionId === id)) {
+      return { kind: "patient", grantHash: patient.grant.hash, patientId: patient.user.id };
+    }
     const grant = this.activeGrant(cookie(request, patientCookie(id)), "patient");
     if (grant?.sessionId === id) {
       if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) this.checkOrigin(request, true);
@@ -100,6 +106,98 @@ export class AuthService {
     if (!session) throw new HttpError(404, "Session not found");
     if (!this.canAccess(principal, session.studyId)) throw new HttpError(403, "Study access denied");
     return { kind: "coordinator", ...(principal.grantHash ? { grantHash: principal.grantHash } : {}), ...(principal.account.id !== legacyAccount.id ? { accountId: principal.account.id } : {}) };
+  }
+  private patientPrincipal(request: FastifyRequest) {
+    const grant = this.activeGrant(cookie(request, PATIENT_COOKIE), "patient_account");
+    const patient = this.store.getAuth().patients?.find((p) => p.id === grant?.patientId);
+    if (!grant || !patient) return;
+    if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) this.checkOrigin(request, true);
+    return { user: { id: patient.id, username: patient.username }, grant };
+  }
+  patient(request: FastifyRequest) {
+    const principal = this.patientPrincipal(request);
+    if (!principal) throw new HttpError(401, "Patient sign in required");
+    return principal.user;
+  }
+  async patientLogin(request: FastifyRequest, reply: FastifyReply, username: unknown, password: unknown, register = false) {
+    this.checkOrigin(request, true);
+    if (typeof username !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{2,39}$/.test(username.trim()) || typeof password !== "string" || password.length > 256 || (register && password.length < 12)) throw new HttpError(400, "Use a 3–40 character username (letters, numbers, dots, underscores or hyphens) and a 12–256 character password");
+    const normalized = username.trim().toLowerCase();
+    this.rateLimit(`patient-ip:${request.ip}`, `patient-name:${digest(normalized)}`);
+    let patient = this.store.getAuth().patients?.find((p) => p.username === normalized);
+    const token = randomBytes(32).toString("base64url");
+    const old = cookie(request, PATIENT_COOKIE);
+    if (register) {
+      const passwordHash = await hashPassword(password);
+      patient = { id: randomUUID(), username: normalized, passwordHash };
+    } else {
+      const valid = await verify(password, patient?.passwordHash ?? this.dummyHash);
+      if (!valid || !patient) throw new HttpError(401, "Username or password is incorrect");
+    }
+    const saved = patient!;
+    await this.store.updateAuth((auth) => {
+      auth.patients ??= [];
+      if (register) {
+        if (auth.patients.some((p) => p.username === normalized)) throw new HttpError(409, "That username is already taken");
+        auth.patients.push(saved);
+      }
+      this.prune(auth);
+      if (old) this.removeGrant(auth, digest(old));
+      auth.grants.push({ hash: digest(token), kind: "patient_account", patientId: saved.id, expiresAt: Date.now() + 24 * HOURS });
+    });
+    this.attempts.delete(`patient-ip:${request.ip}`);
+    this.attempts.delete(`patient-name:${digest(normalized)}`);
+    this.setCookie(reply, PATIENT_COOKIE, token, 24 * 3600);
+    return { user: { id: saved.id, username: saved.username } };
+  }
+  async patientLogout(request: FastifyRequest, reply: FastifyReply) {
+    this.checkOrigin(request, true);
+    const token = cookie(request, PATIENT_COOKIE);
+    if (token) await this.store.updateAuth((auth) => this.removeGrant(auth, digest(token)));
+    this.setCookie(reply, PATIENT_COOKIE, "", 0);
+  }
+  private attachPatient(auth: AuthState, patientId: string, sessionId: string) {
+    auth.memberships ??= [];
+    const existing = auth.memberships.find((m) => m.sessionId === sessionId);
+    if (existing && existing.patientId !== patientId) throw new HttpError(409, "This review is already assigned to a patient. Revoke access before assigning someone else.");
+    if (!existing) auth.memberships.push({ patientId, sessionId, invitedAt: new Date().toISOString() });
+    // Replace temporary review credentials with durable account access.
+    auth.invitations = auth.invitations.filter((i) => i.sessionId !== sessionId);
+    auth.grants = auth.grants.filter((g) => g.sessionId !== sessionId);
+  }
+  async claimPatientReview(request: FastifyRequest, id: string) {
+    const patient = this.patient(request);
+    const grant = this.activeGrant(cookie(request, patientCookie(id)), "patient");
+    await this.store.updateAuth((auth) => {
+      if (auth.memberships?.some((m) => m.patientId === patient.id && m.sessionId === id)) return;
+      if (!grant || grant.sessionId !== id || !auth.grants.some((g) => g.hash === grant.hash && g.expiresAt > Date.now()) || (grant.accountId && !auth.accounts.some((a) => a.id === grant.accountId && !a.disabled))) throw new HttpError(403, "Open your invitation and enter its code to add this study");
+      this.attachPatient(auth, patient.id, id);
+    });
+  }
+  async invitePatient(sessionId: string, username: unknown) {
+    if (typeof username !== "string" || username.length > 40) throw new HttpError(400, "Patient username is required");
+    await this.store.updateAuth((auth) => {
+      const patient = auth.patients?.find((p) => p.username === username.trim().toLowerCase());
+      if (!patient) throw new HttpError(404, "No patient account has that username. Ask the patient to create an account, or share a first-time invitation.");
+      this.attachPatient(auth, patient.id, sessionId);
+    });
+  }
+  patientStudies(request: FastifyRequest) {
+    const patient = this.patient(request);
+    return (this.store.getAuth().memberships ?? []).filter((m) => m.patientId === patient.id).flatMap((m) => {
+      const session = this.store.getSession(m.sessionId);
+      if (!session) return [];
+      const document = session.documentSnapshot ?? this.store.getDocument(session.documentId);
+      return [{ sessionId: session.id, studyId: session.studyId, title: document?.title ?? "Study review", status: session.status, invitedAt: m.invitedAt, isNew: !m.openedAt, reviewedSections: session.results.length, totalSections: document?.sections.length ?? 0 }];
+    }).sort((a, b) => b.invitedAt.localeCompare(a.invitedAt));
+  }
+  async openPatientStudy(request: FastifyRequest, id: string) {
+    const patient = this.patient(request);
+    await this.store.updateAuth((auth) => {
+      const membership = auth.memberships?.find((m) => m.patientId === patient.id && m.sessionId === id);
+      if (!membership) throw new HttpError(403, "Study access denied");
+      membership.openedAt ??= new Date().toISOString();
+    });
   }
   async createAccount(input: { email?: unknown; password?: unknown; name?: unknown; role?: unknown; studyIds?: unknown }) {
     const { email, password, name, role, studyIds } = input;
@@ -157,34 +255,42 @@ export class AuthService {
     const expiresAt = Date.now() + 7 * 24 * HOURS;
     await this.store.updateAuth((auth) => {
       this.prune(auth);
+      if (auth.memberships?.some((m) => m.sessionId === id)) throw new HttpError(409, "This review is already connected to a patient account");
       auth.invitations = auth.invitations.filter((i) => i.sessionId !== id);
       auth.invitations.push({ hash: digest(token), codeHash, sessionId: id, expiresAt, ...(principal.account.id !== legacyAccount.id ? { accountId: principal.account.id } : {}) });
     });
     return { sessionId: id, invitationToken: token, accessCode, expiresAt: new Date(expiresAt).toISOString() };
   }
-  async exchange(request: FastifyRequest, reply: FastifyReply, id: string, token: unknown, accessCode: unknown) {
+  async exchange(request: FastifyRequest, reply: FastifyReply, id: string, token: unknown, accessCode: unknown, requirePatient = false) {
     this.checkOrigin(request);
     if (typeof token !== "string" || token.length > 256 || typeof accessCode !== "string" || accessCode.length > 256) throw new HttpError(400, "Invitation and access code are required");
     this.rateLimit(`ip:${request.ip}`, `invite:${digest(token)}`);
     const invitation = this.store.getAuth().invitations.find((i) => i.hash === digest(token) && i.sessionId === id);
     const valid = await verify(accessCode, invitation?.codeHash ?? this.dummyHash);
     if (!valid || !invitation || invitation.expiresAt <= Date.now()) throw new HttpError(401, "Invitation or access code is invalid or expired");
+    const patient = this.patientPrincipal(request);
+    if (requirePatient && !patient) throw new HttpError(401, "Patient sign in required");
     const patientToken = randomBytes(32).toString("base64url");
     const old = cookie(request, patientCookie(id));
     await this.store.updateAuth((auth) => {
       // Consume and grant atomically, including competing redemption/revocation.
       if (!auth.invitations.some((i) => i.hash === invitation.hash && i.expiresAt > Date.now()) || (invitation.accountId && !auth.accounts.some((a) => a.id === invitation.accountId && !a.disabled))) throw new HttpError(401, "Invitation or access code is invalid or expired");
+      if (patient) {
+        this.attachPatient(auth, patient.user.id, id);
+        return;
+      }
       auth.invitations = auth.invitations.filter((i) => i.hash !== invitation.hash);
       this.prune(auth);
       if (old) this.removeGrant(auth, digest(old));
       auth.grants.push({ hash: digest(patientToken), kind: "patient", sessionId: id, expiresAt: Date.now() + 24 * HOURS, ...(invitation.accountId ? { accountId: invitation.accountId } : {}) });
     });
     this.attempts.delete(`ip:${request.ip}`);
-    this.setCookie(reply, patientCookie(id), patientToken, 24 * 3600);
+    if (!patient) this.setCookie(reply, patientCookie(id), patientToken, 24 * 3600);
     return { sessionId: id };
   }
   async revokeSession(id: string) {
     await this.store.updateAuth((auth) => {
+      auth.memberships = (auth.memberships ?? []).filter((m) => m.sessionId !== id);
       auth.grants = auth.grants.filter((g) => g.sessionId !== id);
       auth.invitations = auth.invitations.filter((i) => i.sessionId !== id);
     });
@@ -194,12 +300,13 @@ export class AuthService {
     const token = randomBytes(32).toString("base64url");
     await this.store.updateAuth((auth) => {
       this.prune(auth);
-      auth.grants.push({ hash: digest(token), kind: "voice", sessionId: id, expiresAt: Date.now() + HOURS, ...(parent.grantHash ? { parentHash: parent.grantHash } : {}), ...(parent.accountId ? { accountId: parent.accountId } : {}) });
+      auth.grants.push({ hash: digest(token), kind: "voice", sessionId: id, expiresAt: Date.now() + HOURS, ...(parent.grantHash ? { parentHash: parent.grantHash } : {}), ...(parent.accountId ? { accountId: parent.accountId } : {}), ...(parent.patientId ? { patientId: parent.patientId } : {}) });
     });
     return token;
   }
   requireVoice(id: string, token: unknown) {
-    if (typeof token !== "string" || this.activeGrant(token, "voice")?.sessionId !== id) throw new HttpError(401, "Voice session access expired or revoked");
+    const grant = typeof token === "string" ? this.activeGrant(token, "voice") : undefined;
+    if (!grant || grant.sessionId !== id || (grant.patientId && !this.store.getAuth().memberships?.some((m) => m.patientId === grant.patientId && m.sessionId === id))) throw new HttpError(401, "Voice session access expired or revoked");
   }
   private removeGrant(auth: AuthState, hash: string) { auth.grants = auth.grants.filter((g) => g.hash !== hash && g.parentHash !== hash); }
   private prune(auth: AuthState) {

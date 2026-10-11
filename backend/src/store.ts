@@ -170,10 +170,12 @@ function isDatabaseState(value: unknown): value is DatabaseState {
 
 function isAuthState(value: unknown): value is AuthState {
   if (!record(value) || !Array.isArray(value.accounts) || !Array.isArray(value.grants) || !Array.isArray(value.invitations)) return false;
-  return value.accounts.every((a: unknown) => record(a) && typeof a.id === "string" && typeof a.email === "string" && typeof a.name === "string" &&
+  return (value.patients === undefined || (Array.isArray(value.patients) && value.patients.every((p: unknown) => record(p) && typeof p.id === "string" && typeof p.username === "string" && typeof p.passwordHash === "string"))) &&
+    (value.memberships === undefined || (Array.isArray(value.memberships) && value.memberships.every((m: unknown) => record(m) && typeof m.patientId === "string" && typeof m.sessionId === "string" && typeof m.invitedAt === "string" && optionalString(m.openedAt)))) &&
+    value.accounts.every((a: unknown) => record(a) && typeof a.id === "string" && typeof a.email === "string" && typeof a.name === "string" &&
     (a.role === "admin" || a.role === "coordinator") && typeof a.disabled === "boolean" && Array.isArray(a.studyIds) && a.studyIds.every((s: unknown) => typeof s === "string") && typeof a.passwordHash === "string") &&
-    value.grants.every((g: unknown) => record(g) && typeof g.hash === "string" && ["coordinator", "patient", "voice"].includes(String(g.kind)) && typeof g.expiresAt === "number" && Number.isFinite(g.expiresAt) &&
-      optionalString(g.accountId) && optionalString(g.sessionId) && optionalString(g.parentHash)) &&
+    value.grants.every((g: unknown) => record(g) && typeof g.hash === "string" && ["coordinator", "patient", "voice", "patient_account"].includes(String(g.kind)) && typeof g.expiresAt === "number" && Number.isFinite(g.expiresAt) &&
+      optionalString(g.patientId) && optionalString(g.accountId) && optionalString(g.sessionId) && optionalString(g.parentHash)) &&
     value.invitations.every((i: unknown) => record(i) && typeof i.hash === "string" && typeof i.codeHash === "string" && typeof i.sessionId === "string" && typeof i.expiresAt === "number" && Number.isFinite(i.expiresAt) && optionalString(i.accountId));
 }
 function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

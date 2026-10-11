@@ -1,4 +1,4 @@
-import Fastify, { type FastifyRequest, type FastifyInstance } from "fastify";
+import Fastify, { LogController, type FastifyRequest, type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import type { Config } from "./config.js";
@@ -13,7 +13,7 @@ import { synthesizeSpeech } from "./voice.js";
 import { ElevenLabsAgentService, requireElevenLabsTool } from "./elevenlabs-agent.js";
 import { NotificationService } from "./notifications.js";
 import { WorkflowService } from "./workflows.js";
-import type { AiProvider, MutationOptions } from "./types.js";
+import type { AiProvider, MutationOptions, TranscriptEntry } from "./types.js";
 
 export interface AppOptions {
   config: Config;
@@ -25,7 +25,14 @@ export interface AppOptions {
 
 export async function createApp(options: AppOptions): Promise<FastifyInstance> {
   const { config } = options;
-  const app = Fastify({ logger: false, bodyLimit: 21 * 1024 * 1024 });
+  const app = Fastify({
+    logger: config.logLevel ? { level: config.logLevel } : false,
+    // Do not include patient URLs, request headers or cookies in access logs.
+    logController: new LogController({ disableRequestLogging: true }),
+    trustProxy: config.trustProxy?.length ? config.trustProxy : false,
+    requestTimeout: 120_000,
+    bodyLimit: 21 * 1024 * 1024,
+  });
   await app.register(cors, { origin: config.corsOrigins, methods: ["GET", "POST"], credentials: true });
   await app.register(multipart, {
     limits: { fileSize: 20 * 1024 * 1024, files: 1, fields: 5 },
@@ -36,7 +43,7 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
   await audit.init();
   const auth = new AuthService(store, config);
   await auth.init();
-  const ai = options.ai ?? new GeminiProvider(config.geminiApiKey, config.geminiModel, config.geminiEmbeddingModel);
+  const ai = options.ai ?? new GeminiProvider(config.geminiApiKey, config.geminiModel, config.geminiEmbeddingModel, config.geminiTranscriptionModel);
   const documents = new DocumentService(store, audit, ai, config.approvedVersions);
   const sessions = new SessionService(store, audit, ai);
   const workflows = new WorkflowService(store, audit);
@@ -82,6 +89,25 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
   app.post<{ Params: { id: string } }>("/auth/accounts/:id/disable", async (request) => {
     await auth.disable(request.params.id, auth.admin(request).account.id); return { ok: true };
   });
+
+  for (const action of ["register", "login"] as const) {
+    app.post<{ Body: { username?: unknown; password?: unknown } }>(`/patient/${action}`, async (request, reply) => {
+      const result = await auth.patientLogin(request, reply, request.body?.username, request.body?.password, action === "register");
+      await audit.append(`patient.${action}`, { patientId: result.user.id });
+      return reply.code(action === "register" ? 201 : 200).send(result);
+    });
+  }
+  app.get("/patient/me", async (request) => ({ user: auth.patient(request) }));
+  app.post("/patient/logout", async (request, reply) => { await auth.patientLogout(request, reply); return { ok: true }; });
+  app.post<{ Params: { id: string }; Body: { invitationToken?: unknown; accessCode?: unknown } }>("/patient/studies/:id/accept", async (request, reply) => {
+    auth.patient(request);
+    const result = await auth.exchange(request, reply, request.params.id, request.body?.invitationToken, request.body?.accessCode, true);
+    await audit.append("access.redeemed", { patientId: auth.patient(request).id }, request.params.id);
+    return result;
+  });
+  app.post<{ Params: { id: string } }>("/patient/studies/:id/claim", async (request) => { await auth.claimPatientReview(request, request.params.id); return { ok: true }; });
+  app.get("/patient/studies", async (request) => ({ studies: auth.patientStudies(request) }));
+  app.post<{ Params: { id: string } }>("/patient/studies/:id/open", async (request) => { await auth.openPatientStudy(request, request.params.id); return { ok: true }; });
 
   app.get("/documents", async (request) => {
     const principal = auth.coordinator(request);
@@ -198,6 +224,12 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
     await audit.append("access.invited", { accountId: principal.account.id }, session.id);
     return reply.code(201).send(invitation);
   });
+  app.post<{ Params: { id: string }; Body: { username?: unknown } }>("/sessions/:id/patient-invitation", async (request, reply) => {
+    const { session, principal } = scopedSession(request, request.params.id);
+    await auth.invitePatient(session.id, request.body?.username);
+    await audit.append("access.patient_invited", { accountId: principal.account.id }, session.id);
+    return reply.code(201).send({ ok: true });
+  });
   app.post<{ Params: { id: string }; Body: { invitationToken?: unknown; accessCode?: unknown } }>("/sessions/:id/access", async (request, reply) => {
     const result = await auth.exchange(request, reply, request.params.id, request.body?.invitationToken, request.body?.accessCode);
     await audit.append("access.redeemed", {}, request.params.id);
@@ -308,6 +340,26 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
     });
   });
 
+  app.post<{ Params: { id: string }; Body: { message?: unknown } }>("/sessions/:id/messages", async (request) => {
+    auth.session(request, request.params.id);
+    const message = request.body?.message;
+    if (typeof message !== "string") throw new HttpError(400, "message is required");
+    return sessions.message(request.params.id, message, mutationOptions(request));
+  });
+
+  app.post<{ Params: { id: string }; Body: { messages?: unknown } }>("/sessions/:id/voice-transcript", async (request) => {
+    auth.session(request, request.params.id);
+    const messages = request.body?.messages;
+    if (!Array.isArray(messages) || messages.length > 100 || messages.some((message) =>
+      !message || typeof message !== "object" || typeof message.id !== "string" || !/^[A-Za-z0-9_-]{8,100}$/.test(message.id) ||
+      !["ai", "patient"].includes(message.role) || typeof message.content !== "string" || !message.content.trim() || message.content.length > 20000 ||
+      typeof message.timestamp !== "string" || !Number.isFinite(Date.parse(message.timestamp)))) {
+      throw new HttpError(400, "Provide up to 100 valid voice transcript messages");
+    }
+    await sessions.saveVoiceTranscript(request.params.id, messages as TranscriptEntry[]);
+    return { ok: true };
+  });
+
   app.post<{ Params: { id: string }; Body: { response?: unknown } }>("/sessions/:id/responses", async (request) => {
     auth.session(request, request.params.id);
     const response = request.body?.response;
@@ -338,6 +390,24 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
     const bytes = await part.toBuffer();
     if (part.file.truncated) throw new HttpError(413, "Audio exceeds the 10 MiB limit");
     return sessions.audio(request.params.id, bytes, part.mimetype, mutationOptions(request));
+  });
+
+  // Dictation only creates a draft: it must never grade, persist, or advance a review.
+  app.post<{ Params: { id: string } }>("/sessions/:id/transcription", async (request) => {
+    auth.session(request, request.params.id);
+    const session = store.getSession(request.params.id);
+    if (!session) throw new HttpError(404, "Session not found");
+    if (session.status === "completed") throw new HttpError(409, "Session is already complete");
+    const part = await request.file({ limits: { fileSize: 10 * 1024 * 1024 } });
+    if (!part || part.fieldname !== "file") throw new HttpError(400, "Recorded audio is required");
+    const mime = part.mimetype.split(";")[0]!.trim().toLowerCase();
+    if (!/^audio\/(?:aac|flac|mp3|mp4|m4a|mpeg|mpga|ogg|opus|wav|webm)$/.test(mime)) throw new HttpError(415, "Audio format is not supported");
+    const bytes = await part.toBuffer();
+    if (part.file.truncated || !bytes.length || bytes.length > 10 * 1024 * 1024) throw new HttpError(413, "Audio must be between 1 byte and 10 MiB");
+    // Safari records audio-only MP4; Gemini names this container audio/m4a.
+    const text = (await ai.transcribeAudio(bytes, mime === "audio/mp4" ? "audio/m4a" : mime)).trim();
+    if (!text) throw new HttpError(422, "No speech was detected. Please try again.");
+    return { text };
   });
 
   app.post<{ Params: { id: string } }>("/sessions/:id/speech", async (request, reply) => {

@@ -18,7 +18,7 @@ export default function NewSessionPage() {
   const published = query.data?.filter((d) => d.lifecycle === "published") ?? [];
   return <div className="max-w-2xl space-y-8">
     <Link className="underline" to="/dashboard/sessions">Back to Sessions</Link><h1 className="text-4xl font-semibold">Create Session</h1>
-    <p className="text-muted-foreground">Choose an approved document. After creating the review, invite the participant with a private link and separate access code.</p>
+    <p className="text-muted-foreground">Choose an approved document. After creating the review, invite the patient by username or share a first-time invitation to connect their account.</p>
     <QueryState pending={query.isPending} error={query.error} retry={query.refetch} />
     {error && <p role="alert" className="text-destructive">{error}</p>}
     {query.data && <form className="space-y-5" onSubmit={async (e) => {

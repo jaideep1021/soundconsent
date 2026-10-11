@@ -39,30 +39,28 @@ test("real backend: authentication, multipart PDF processing and version errors"
 test("real backend: questions, re-explanation, flagging, completion, report and reload", async ({ page }) => {
   const patientHeaders: Array<string | undefined> = [];
   page.on("request", (request) => {
-    if (/\/(questions|responses)$/.test(request.url())) patientHeaders.push(request.headers().authorization);
+    if (/\/(messages)$/.test(request.url())) patientHeaders.push(request.headers().authorization);
   });
   await start(page);
   await expect(page.getByRole("log")).toContainText("I am an automated assistant, not a doctor");
-  await page.getByLabel("Message type").selectOption("question");
-  await page.getByLabel("Your question").fill("When are visits?");
-  await page.getByRole("button", { name: "Send question" }).click();
+  await page.getByLabel("Your message").fill("When are visits?");
+  await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByRole("log")).toContainText("Sources: Purpose");
   await expect(page.getByRole("heading", { name: "Section 1 of 2: Purpose" })).toBeVisible();
-  await page.getByLabel("Your question").fill("I need a human");
-  await page.getByRole("button", { name: "Send question" }).click();
+  await page.getByLabel("Your message").fill("I need a human");
+  await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByRole("status").filter({ hasText: "saved for clinical follow-up" })).toBeVisible();
-  await page.getByLabel("Message type").selectOption("response");
-  await page.getByLabel("Your teach-back response").fill("unsure");
-  await page.getByRole("button", { name: "Send response" }).click();
+  await page.getByLabel("Your message").fill("unsure");
+  await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByRole("log")).toContainText("Let's review this section another way");
   await expect(page.getByRole("heading", { name: "Section 1 of 2: Purpose" })).toBeVisible();
-  await page.getByLabel("Your teach-back response").fill("still unsure");
-  await page.getByRole("button", { name: "Send response" }).click();
+  await page.getByLabel("Your message").fill("still unsure");
+  await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByRole("heading", { name: "Section 2 of 2: Risks" })).toBeVisible();
-  await page.getByLabel("Your teach-back response").fill("understood: participation is voluntary; email test@example.com");
-  await page.getByRole("button", { name: "Send response" }).click();
+  await page.getByLabel("Your message").fill("understood: participation is voluntary; email test@example.com");
+  await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByRole("heading", { name: "Review completed", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Send response" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send message" })).toHaveCount(0);
   await page.getByRole("link", { name: "View Report", exact: true }).click();
   const report = page.getByRole("region", { name: "Understanding report" });
   await expect(report).toContainText("Needs human follow-up");
@@ -81,18 +79,261 @@ test("real backend: questions, re-explanation, flagging, completion, report and 
   await expect(report).toContainText("Review completed");
 });
 
-test("real backend: recorded response and provider-unavailable recovery", async ({ page }) => {
+test("one composer understands questions, mixed messages, acknowledgments and teach-back", async ({ page }) => {
   await start(page);
-  await page.getByRole("button", { name: "Start voice conversation" }).click();
+  await expect(page.getByRole("group", { name: "Message type" })).toHaveCount(0);
+  const draft = page.getByLabel("Your message");
+  for (const message of ["Please explain the visits", "understood: monthly visits, but are they required?"]) {
+    await draft.fill(message);
+    await draft.press("Enter");
+    await expect(page.getByRole("log")).toContainText(message);
+    await expect(draft).toBeEnabled();
+    await expect(page.getByText("Attempts on current section: 0")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Section 1 of 2: Purpose" })).toBeVisible();
+  }
+  await draft.fill("okay");
+  await draft.press("Enter");
+  await expect(page.getByRole("log")).toContainText("Tell me what you understand about this section");
+  await expect(page.getByText("Attempts on current section: 0")).toBeVisible();
+  await draft.fill("understood: visits are monthly");
+  await draft.press("Enter");
+  await expect(page.getByRole("heading", { name: "Section 2 of 2: Risks" })).toBeVisible();
+});
+
+test("failed text sends preserve the draft and allow a safe retry without manual refresh", async ({ page }) => {
+  await start(page);
+  const requestKeys: Array<string | undefined> = [];
+  await page.route("**/messages", async (route) => {
+    requestKeys.push(route.request().headers()["idempotency-key"]);
+    if (requestKeys.length === 1) {
+      await route.fulfill({ status: 503, json: { error: "The text assistant is temporarily busy. Please try sending your message again shortly." } });
+    } else await route.continue();
+  });
+  const draft = page.getByLabel("Your message");
+  await draft.fill("understood: monthly visits");
+  await draft.press("Enter");
+  await expect(page.getByRole("alert")).toContainText("temporarily busy");
+  await expect(draft).toBeEnabled();
+  await expect(draft).toHaveValue("understood: monthly visits");
+  await expect(page.getByRole("button", { name: "Voice mode", exact: true })).toBeEnabled();
+  await expect(page.getByRole("log")).not.toContainText("understood: monthly visits");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByRole("heading", { name: "Section 2 of 2: Risks" })).toBeVisible();
+  await expect(draft).toHaveValue("");
+  expect(requestKeys).toHaveLength(2);
+  expect(requestKeys[0]).toBeTruthy();
+  expect(requestKeys[1]).toBe(requestKeys[0]);
+});
+
+async function mockMicrophone(page: Page, denied = false) {
+  await page.addInitScript(({ denied }) => {
+    Object.defineProperty(navigator.mediaDevices, "getUserMedia", { value: async () => {
+      if (denied) throw new DOMException("Permission denied", "NotAllowedError");
+      return { getTracks: () => [{ stop: () => { document.documentElement.dataset.micStopped = "true"; } }] };
+    } });
+    class Recorder {
+      static isTypeSupported() { return true; }
+      mimeType = "audio/webm";
+      state = "inactive";
+      ondataavailable: ((event: { data: Blob }) => void) | null = null;
+      onstop: (() => void) | null = null;
+      start() { this.state = "recording"; }
+      stop() {
+        this.state = "inactive";
+        this.ondataavailable?.({ data: new Blob(["fixture microphone audio"], { type: this.mimeType }) });
+        this.onstop?.();
+      }
+    }
+    Object.defineProperty(window, "MediaRecorder", { value: Recorder });
+  }, { denied });
+}
+
+test("dictation creates an editable draft and only Enter sends a question", async ({ page }) => {
+  await mockMicrophone(page);
+  await start(page);
+  await expect(page.locator('input[type="file"][accept="audio/*"]')).toHaveCount(0);
+  const composer = page.getByRole("form", { name: "Message composer" });
+  await expect(composer).toBeVisible();
+  const draft = page.getByLabel("Your message");
+  await draft.fill("Please explain");
+  await composer.getByRole("button", { name: "Dictate message" }).click();
+  await expect(composer).toContainText("Listening…");
+  await expect(composer.getByRole("button", { name: "Voice mode", exact: true })).toBeDisabled();
+  await expect(draft).toHaveValue("Please explain");
+  await composer.getByRole("button", { name: "Stop dictation" }).click();
+  await expect(draft).toHaveValue("Please explain understood: visits are voluntary");
+  await expect(draft).toBeFocused();
+  await expect(page.locator("html")).toHaveAttribute("data-mic-stopped", "true");
+  await expect(page.getByRole("log")).not.toContainText("Please explain");
+  await expect(page.getByText("Attempts on current section: 0")).toBeVisible();
+  await draft.fill("When are visits?");
+  await draft.press("Shift+Enter");
+  await expect(draft).toHaveValue("When are visits?\n");
+  await draft.press("Enter");
+  await expect(page.getByRole("log")).toContainText("When are visits?");
+  await expect(page.getByRole("log")).toContainText("Sources: Purpose");
+  await expect(draft).toHaveValue("");
+  await expect(page.getByRole("heading", { name: "Section 1 of 2: Purpose" })).toBeVisible();
+});
+
+test("microphone and voice provider failures preserve typing", async ({ page }) => {
+  await mockMicrophone(page, true);
+  await start(page);
+  await page.getByLabel("Your message").fill("understood: visits are voluntary");
+  await page.getByRole("button", { name: "Dictate message" }).click();
+  await expect(page.getByRole("alert")).toContainText("Microphone access was denied");
+  await expect(page.getByLabel("Your message")).toHaveValue("understood: visits are voluntary");
+  await page.getByRole("button", { name: "Voice mode", exact: true }).click();
   await expect(page.getByRole("alert")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Send response" })).toBeDisabled(); // Empty input, not a stuck request.
-  await page.getByLabel("Or submit a recorded").setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: Buffer.from("test fixture audio") });
+  await expect(page.getByRole("button", { name: "Voice mode", exact: true })).toBeEnabled();
+  await page.getByLabel("Your message").press("Enter");
   await expect(page.getByRole("heading", { name: "Section 2 of 2: Risks" })).toBeVisible();
   await page.getByRole("button", { name: "Listen to latest assistant response" }).click();
   await expect(page.getByRole("alert")).toHaveText("ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID are required");
-  await page.getByLabel("Your teach-back response").fill("understood: visits may cause discomfort");
-  await page.getByRole("button", { name: "Send response" }).click();
+  await page.getByLabel("Your message").fill("understood: visits may cause discomfort");
+  await page.getByLabel("Your message").press("Enter");
   await expect(page.getByRole("heading", { name: "Review completed", exact: true })).toBeVisible();
+});
+
+test("voice mode connects in the chat, shows both speakers and restores the draft on exit", async ({ page }) => {
+  await page.route("**/conversation-url", (route) => route.fulfill({ json: { signedUrl: "wss://voice.example.test", dynamicVariables: {} } }));
+  await page.route(/\/@elevenlabs_client\.js/, (route) => route.fulfill({ contentType: "application/javascript", body: `
+    export const Conversation = { async startSession(options) {
+      if (options.connectionType !== "websocket" || options.textOnly !== false) throw new Error("Expected audio conversation");
+      options.onStatusChange({ status: "connected" });
+      options.onModeChange({ mode: "speaking" });
+      options.onMessage({ role: "user", message: "Can you explain the visits?" });
+      options.onMessage({ role: "agent", message: "I can explain the study visits." });
+      return { async endSession() { options.onDisconnect(); } };
+    } };
+  ` }));
+  await start(page);
+  const draft = page.getByLabel("Your message");
+  await draft.fill("My draft answer");
+  await page.getByRole("button", { name: "Voice mode", exact: true }).click();
+  await expect(page.getByText("Assistant speaking…", { exact: true })).toBeVisible();
+  await expect(page.getByRole("log")).toContainText("Can you explain the visits?");
+  await expect(page.getByRole("log")).toContainText("I can explain the study visits.");
+  await expect(draft).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Dictate message" })).toBeDisabled();
+  await page.getByRole("button", { name: "End voice mode" }).click();
+  await expect(draft).toBeEnabled();
+  await expect(draft).toHaveValue("My draft answer");
+  await expect(page.getByRole("button", { name: "Voice mode", exact: true })).toBeEnabled();
+  await expect(page.getByRole("log")).toContainText("Can you explain the visits?");
+  await expect(page.getByRole("log")).toContainText("I can explain the study visits.");
+  await page.reload();
+  await expect(page.getByRole("log")).toContainText("Can you explain the visits?");
+  await expect(page.getByRole("log")).toContainText("I can explain the study visits.");
+});
+
+test("voice client tools process multiple turns and preserve history after completion and reload", async ({ page }) => {
+  await page.route("**/conversation-url", (route) => route.fulfill({ json: { signedUrl: "wss://voice.example.test", dynamicVariables: { session_revision: "0" } } }));
+  await page.route(/\/@elevenlabs_client\.js/, (route) => route.fulfill({ contentType: "application/javascript", body: `
+    export const Conversation = { async startSession(options) {
+      options.onStatusChange({ status: "connected" });
+      for (const [field, message] of [["question", "When are visits?"], ["response", "understood: monthly visits"], ["response", "understood: voluntary participation"]]) {
+        options.onMessage({ role: "user", message });
+        const name = field === "question" ? "teach_it_back_answer_consent_question" : "teach_it_back_submit_teach_back";
+        const result = JSON.parse(await options.clientTools[name]({ [field]: message }));
+        options.onMessage({ role: "agent", message: result.message });
+      }
+      options.onModeChange({ mode: "speaking" });
+      return { async endSession() { options.onDisconnect(); } };
+    } };
+  ` }));
+  await start(page);
+  await page.getByRole("button", { name: "Voice mode", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Review completed", exact: true })).toBeVisible();
+  await expect(page.getByText("Assistant speaking…", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "End voice mode" }).click();
+  const log = page.getByRole("log");
+  await expect(log.getByText("understood: monthly visits", { exact: true })).toHaveCount(1);
+  await expect(log.getByText("understood: voluntary participation", { exact: true })).toHaveCount(1);
+  await page.reload();
+  await expect(log).toContainText("When are visits?");
+  await expect(log.getByText("understood: monthly visits", { exact: true })).toHaveCount(1);
+  await expect(log.getByText("understood: voluntary participation", { exact: true })).toHaveCount(1);
+});
+
+test("real ElevenLabs SDK routes streamed WebSocket audio into browser playback", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator.mediaDevices, "getUserMedia", { value: async () => {
+      const context = new AudioContext();
+      return context.createMediaStreamDestination().stream;
+    } });
+    const original = MessagePort.prototype.postMessage;
+    MessagePort.prototype.postMessage = function (message, transfer: Transferable[] = []) {
+      if (message?.type === "buffer" && message.buffer instanceof ArrayBuffer) {
+        document.documentElement.dataset.voicePlaybackBytes = String(message.buffer.byteLength);
+      }
+      original.call(this, message, transfer);
+    };
+  });
+  await page.route("**/conversation-url", (route) => route.fulfill({ json: { signedUrl: "wss://voice.example.test/conversation", dynamicVariables: {} } }));
+  const pcm = Buffer.alloc(16000);
+  for (let i = 0; i < pcm.length / 2; i++) pcm.writeInt16LE(Math.round(1000 * Math.sin(2 * Math.PI * 440 * i / 16000)), i * 2);
+  let sendVoiceTurn: (() => void) | undefined;
+  await page.routeWebSocket(/voice\.example\.test/, (socket) => {
+    let closed = false;
+    socket.onClose(() => { closed = true; });
+    socket.onMessage((data) => {
+      const event = JSON.parse(String(data));
+      if (event.type !== "conversation_initiation_client_data") return;
+      socket.send(JSON.stringify({ type: "conversation_initiation_metadata", conversation_initiation_metadata_event: {
+        conversation_id: "voice-playback-test", agent_output_audio_format: "pcm_16000", user_input_audio_format: "pcm_16000",
+      } }));
+      sendVoiceTurn = () => {
+        if (closed) return;
+        socket.send(JSON.stringify({ type: "agent_response", agent_response_event: { agent_response: "Streaming playback test" } }));
+        socket.send(JSON.stringify({ type: "audio", audio_event: { audio_base_64: pcm.toString("base64"), event_id: 1 } }));
+      };
+    });
+  });
+  await start(page);
+  await page.getByRole("button", { name: "Voice mode", exact: true }).click();
+  await expect(page.getByRole("button", { name: "End voice mode" })).toBeEnabled();
+  expect(sendVoiceTurn).toBeDefined();
+  sendVoiceTurn!();
+  await expect(page.getByRole("log")).toContainText("Streaming playback test");
+  await expect(page.locator("html")).toHaveAttribute("data-voice-playback-bytes", String(pcm.length));
+  await page.getByRole("button", { name: "End voice mode" }).click();
+  await expect(page.getByLabel("Your message")).toBeEnabled();
+});
+
+test("failed transcription keeps the draft and releases the microphone", async ({ page }) => {
+  await mockMicrophone(page);
+  await page.route("**/transcription", (route) => route.fulfill({ status: 502, json: { error: "Transcription unavailable. Please try again." } }));
+  await start(page);
+  const draft = page.getByLabel("Your message");
+  await draft.fill("Keep this answer");
+  await page.getByRole("button", { name: "Dictate message" }).click();
+  await page.getByRole("button", { name: "Stop dictation" }).click();
+  await expect(page.getByRole("alert")).toContainText("Transcription unavailable");
+  await expect(draft).toBeEnabled();
+  await expect(draft).toHaveValue("Keep this answer");
+  await expect(page.locator("html")).toHaveAttribute("data-mic-stopped", "true");
+  await expect(page.getByRole("button", { name: "Voice mode", exact: true })).toBeEnabled();
+});
+
+test("completing the review while dictating stops capture without submitting the recording", async ({ page }) => {
+  await mockMicrophone(page);
+  await start(page);
+  const id = new URL(page.url()).pathname.split("/")[3];
+  let transcriptions = 0;
+  page.on("request", (request) => { if (request.url().endsWith("/transcription")) transcriptions++; });
+  await page.getByRole("button", { name: "Dictate message" }).click();
+  await expect(page.getByRole("button", { name: "Stop dictation" })).toBeVisible();
+  for (let turn = 0; turn < 2; turn++) {
+    const response = await page.request.post(`/api/sessions/${id}/responses`, {
+      headers: { origin: "http://127.0.0.1:4174" }, data: { response: "understood: visits are voluntary" },
+    });
+    expect(response.status()).toBe(200);
+  }
+  await expect(page.getByRole("heading", { name: "Review completed", exact: true })).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-mic-stopped", "true");
+  await expect(page.getByRole("form", { name: "Message composer" })).toHaveCount(0);
+  expect(transcriptions).toBe(0);
 });
 
 test("dashboard is accessible on mobile and unknown IDs remain recoverable", async ({ page }) => {
@@ -110,7 +351,7 @@ test("dashboard is accessible on mobile and unknown IDs remain recoverable", asy
 test("patient invitation redemption, cross-browser resume, single use and access revocation", async ({ page, browser }) => {
   await start(page);
   const id = new URL(page.url()).pathname.split("/")[3];
-  await page.getByRole("button", { name: "Create patient invitation" }).click();
+  await page.getByRole("button", { name: "Create first-time invitation" }).click();
   const invitation = await page.getByLabel("Patient invitation link").inputValue();
   const code = await page.getByLabel("Patient access code").inputValue();
   const context = await browser.newContext();
@@ -120,28 +361,53 @@ test("patient invitation redemption, cross-browser resume, single use and access
     expect(denied.status()).toBe(401);
     await patient.goto(invitation);
     await expect(patient).toHaveURL(new RegExp(`/session/${id}$`));
+    await patient.getByRole("button", { name: "New here? Create an account" }).click();
+    await patient.getByLabel("Username", { exact: true }).fill("invited-patient");
+    await patient.getByLabel("Password", { exact: true }).fill("patient-test-password");
+    await patient.getByRole("button", { name: "Create account", exact: true }).click();
     await patient.getByLabel("Access code", { exact: true }).fill("wrong");
-    await patient.getByRole("button", { name: "Open review", exact: true }).click();
+    await patient.getByRole("button", { name: "Add study to my homepage", exact: true }).click();
     await expect(patient.getByRole("alert")).toHaveText("Invitation or access code is invalid or expired");
     await patient.getByLabel("Access code", { exact: true }).fill(code);
-    await patient.getByRole("button", { name: "Open review", exact: true }).click();
+    await patient.getByRole("button", { name: "Add study to my homepage", exact: true }).click();
+    await expect(patient.getByRole("heading", { name: "My studies" })).toBeVisible();
+    await expect(patient.getByText("New study", { exact: true })).toBeVisible();
+    await patient.getByRole("button", { name: "Start review", exact: true }).click();
     await expect(patient.getByRole("heading", { name: "Your understanding review" })).toBeVisible();
-    await patient.getByRole("link", { name: "Text Chat", exact: true }).click();
+    await patient.getByRole("link", { name: "Review", exact: true }).click();
     await expect(patient.getByRole("heading", { name: "Section 1 of 2: Purpose" })).toBeVisible();
-    expect(await patient.evaluate(() => document.cookie)).not.toContain("sc_review_");
-    const cookie = (await context.cookies()).find((c) => c.name.startsWith("sc_review_"));
+    expect(await patient.evaluate(() => document.cookie)).not.toContain("sc_patient");
+    const cookie = (await context.cookies()).find((c) => c.name === "sc_patient");
     expect(cookie?.httpOnly).toBe(true);
     expect(cookie?.sameSite).toBe("Strict");
     expect((await context.request.get("http://127.0.0.1:4174/api/documents")).status()).toBe(401);
-    await patient.getByLabel("Your teach-back response").fill("unsure; contact person@example.com");
-    await patient.getByRole("button", { name: "Send response" }).click();
+    await patient.getByLabel("Your message").fill("unsure; contact person@example.com");
+    await patient.getByRole("button", { name: "Send message" }).click();
     await expect(patient.getByText("Attempts on current section: 1")).toBeVisible();
     await patient.reload();
     await expect(patient.getByText("Attempts on current section: 1")).toBeVisible();
     await expect(patient.getByRole("log")).toContainText("[REDACTED_EMAIL]");
     await expect(patient.getByRole("log")).toContainText("Let's review this section another way");
-    const replay = await context.request.post(`http://127.0.0.1:4174/api/sessions/${id}/access`, { data: { invitationToken: new URLSearchParams(new URL(invitation).hash.slice(1)).get("invite"), accessCode: code } });
+    const replay = await context.request.post(`http://127.0.0.1:4174/api/sessions/${id}/access`, { headers: { origin: "http://127.0.0.1:4174" }, data: { invitationToken: new URLSearchParams(new URL(invitation).hash.slice(1)).get("invite"), accessCode: code } });
     expect(replay.status()).toBe(401);
+    await patient.getByRole("button", { name: "Sign out", exact: true }).click();
+    await expect(patient.getByRole("heading", { name: "Patient sign in" })).toBeVisible();
+    const returningContext = await browser.newContext();
+    try {
+      const returning = await returningContext.newPage();
+      await returning.goto("http://127.0.0.1:4174/patient");
+      await returning.getByLabel("Username", { exact: true }).fill("INVITED-PATIENT");
+      await returning.getByLabel("Password", { exact: true }).fill("patient-test-password");
+      await returning.getByRole("button", { name: "Sign in", exact: true }).click();
+      await returning.getByRole("button", { name: "Continue review", exact: true }).click();
+      await returning.getByRole("link", { name: "Review", exact: true }).click();
+      await expect(returning.getByText("Attempts on current section: 1")).toBeVisible();
+    } finally { await returningContext.close(); }
+    await patient.getByLabel("Username", { exact: true }).fill("invited-patient");
+    await patient.getByLabel("Password", { exact: true }).fill("patient-test-password");
+    await patient.getByRole("button", { name: "Sign in", exact: true }).click();
+    await patient.getByRole("button", { name: "Continue review", exact: true }).click();
+    await patient.getByRole("link", { name: "Review", exact: true }).click();
     await page.reload();
     await expect(page.getByText("Attempts on current section: 1")).toBeVisible();
     await page.getByRole("button", { name: "Revoke patient access" }).click();
@@ -155,8 +421,8 @@ test("patient invitation redemption, cross-browser resume, single use and access
 test("coordinator saved records, source text, resume and server logout", async ({ page }) => {
   await start(page);
   const id = new URL(page.url()).pathname.split("/")[3];
-  await page.getByLabel("Your teach-back response").fill("understood: monthly visits");
-  await page.getByRole("button", { name: "Send response" }).click();
+  await page.getByLabel("Your message").fill("understood: monthly visits");
+  await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByRole("heading", { name: "Section 2 of 2: Risks" })).toBeVisible();
   await page.goto("/dashboard/documents/integration-document");
   await page.getByText("Purpose", { exact: true }).click();
@@ -210,9 +476,8 @@ test("document draft editing, publication, archive and settings persist through 
 
 test("coordinator can acknowledge and resolve follow-up with durable history", async ({ page }) => {
   await start(page);
-  await page.getByLabel("Message type").selectOption("question");
-  await page.getByLabel("Your question").fill("I need a human");
-  await page.getByRole("button", { name: "Send question" }).click();
+  await page.getByLabel("Your message").fill("I need a human");
+  await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByRole("log")).toContainText("study coordinator or nurse");
   await page.getByRole("link", { name: "View Report", exact: true }).click();
   const panel = page.getByRole("region", { name: "Clinical follow-up" });
@@ -244,27 +509,32 @@ test("coordinator can acknowledge and resolve follow-up with durable history", a
 
 test("polling shows remote progress, stale drafts are rejected, and participant acknowledgment persists", async ({ page, browser }) => {
   await start(page);
-  await page.getByLabel("Your teach-back response").fill("understood: an old draft for the purpose section");
-  await page.getByRole("button", { name: "Create patient invitation" }).click();
+  await page.getByLabel("Your message").fill("understood: an old draft for the purpose section");
+  await page.getByRole("button", { name: "Create first-time invitation" }).click();
   const invitation = await page.getByLabel("Patient invitation link").inputValue();
   const code = await page.getByLabel("Patient access code").inputValue();
   const context = await browser.newContext(); const patient = await context.newPage();
   try {
     await patient.goto(invitation);
+    await patient.getByRole("button", { name: "New here? Create an account" }).click();
+    await patient.getByLabel("Username", { exact: true }).fill("polling-patient");
+    await patient.getByLabel("Password", { exact: true }).fill("patient-test-password");
+    await patient.getByRole("button", { name: "Create account", exact: true }).click();
     await patient.getByLabel("Access code", { exact: true }).fill(code);
-    await patient.getByRole("button", { name: "Open review", exact: true }).click();
-    await patient.getByRole("link", { name: "Text Chat", exact: true }).click();
-    await patient.getByLabel("Your teach-back response").fill("understood: monthly visits");
-    await patient.getByRole("button", { name: "Send response" }).click();
+    await patient.getByRole("button", { name: "Add study to my homepage", exact: true }).click();
+    await patient.getByRole("button", { name: "Start review", exact: true }).click();
+    await patient.getByRole("link", { name: "Review", exact: true }).click();
+    await patient.getByLabel("Your message").fill("understood: monthly visits");
+    await patient.getByRole("button", { name: "Send message" }).click();
     await expect(patient.getByRole("heading", { name: "Section 2 of 2: Risks" })).toBeVisible();
     await page.bringToFront();
     await expect(page.getByRole("heading", { name: "Section 2 of 2: Risks" })).toBeVisible({ timeout: 10000 });
-    await page.getByRole("button", { name: "Send response" }).click();
+    await page.getByRole("button", { name: "Send message" }).click();
     await expect(page.getByRole("alert")).toContainText("Review changed; refresh");
     await page.getByRole("button", { name: "Refresh review", exact: true }).click();
-    await expect(page.getByLabel("Your teach-back response")).toHaveValue("");
-    await patient.getByLabel("Your teach-back response").fill("understood: voluntary participation");
-    await patient.getByRole("button", { name: "Send response" }).click();
+    await expect(page.getByLabel("Your message")).toHaveValue("");
+    await patient.getByLabel("Your message").fill("understood: voluntary participation");
+    await patient.getByRole("button", { name: "Send message" }).click();
     await expect(patient.getByRole("heading", { name: "Review completed", exact: true })).toBeVisible();
     await patient.getByRole("link", { name: "Review summary", exact: true }).click();
     await expect(patient.getByRole("button", { name: "Acknowledge review completion" })).toBeDisabled();
@@ -328,7 +598,7 @@ test("homepage destinations, legacy links and server session expiry use one work
 test("patient text and voice share progress on mobile, legacy invitations work, and logout removes access", async ({ page, browser }) => {
   await start(page);
   const id = new URL(page.url()).pathname.split("/")[3];
-  await page.getByRole("button", { name: "Create patient invitation" }).click();
+  await page.getByRole("button", { name: "Create first-time invitation" }).click();
   const invitation = (await page.getByLabel("Patient invitation link").inputValue()).replace(`/session/${id}`, `/review/${id}`);
   const code = await page.getByLabel("Patient access code").inputValue();
   const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
@@ -336,26 +606,38 @@ test("patient text and voice share progress on mobile, legacy invitations work, 
   try {
     await patient.goto(invitation);
     await expect(patient).toHaveURL(new RegExp(`/session/${id}$`));
+    await patient.getByRole("button", { name: "New here? Create an account" }).click();
+    await patient.getByLabel("Username", { exact: true }).fill("mobile-patient");
+    await patient.getByLabel("Password", { exact: true }).fill("patient-test-password");
+    await patient.getByRole("button", { name: "Create account", exact: true }).click();
     await patient.getByLabel("Access code", { exact: true }).fill(code);
-    await patient.getByRole("button", { name: "Open review", exact: true }).click();
+    await patient.getByRole("button", { name: "Add study to my homepage", exact: true }).click();
+    await patient.getByRole("button", { name: "Start review", exact: true }).click();
     await expect(patient.getByRole("heading", { name: "Your understanding review" })).toBeVisible();
     await patient.goto(`http://127.0.0.1:4174/session/${id}/summary`);
     await expect(patient).toHaveURL(new RegExp(`/session/${id}/chat$`));
-    await patient.getByLabel("Your teach-back response").fill("unsure");
-    await patient.getByRole("button", { name: "Send response" }).click();
+    await expect(patient.getByRole("button", { name: "Voice mode", exact: true })).toBeVisible();
+    await expect(patient.getByRole("button", { name: "Dictate message" })).toBeVisible();
+    await patient.getByLabel("Your message").fill("unsure");
+    await patient.getByRole("button", { name: "Send message" }).click();
     await expect(patient.getByText("Attempts on current section: 1")).toBeVisible();
-    await patient.getByRole("link", { name: "Voice", exact: true }).click();
-    await expect(patient.getByRole("heading", { name: "Voice review" })).toBeVisible();
+    const navigation = patient.getByRole("navigation", { name: "Review navigation" });
+    await expect(navigation.getByRole("link")).toHaveCount(2);
+    await expect(navigation.getByRole("link", { name: "Overview", exact: true })).toBeVisible();
+    await expect(navigation.getByRole("link", { name: "Review", exact: true })).toHaveAttribute("aria-current", "page");
+    await patient.goto(`http://127.0.0.1:4174/session/${id}/voice`);
+    await expect(navigation.getByRole("link", { name: "Review", exact: true })).toHaveAttribute("aria-current", "page");
+    await expect(patient.getByRole("heading", { name: "Your review" })).toBeVisible();
     await expect(patient.getByText("Attempts on current section: 1")).toBeVisible();
-    await expect(patient.getByRole("button", { name: "Start voice conversation" })).toBeVisible();
+    await expect(patient.getByRole("button", { name: "Voice mode", exact: true })).toBeVisible();
     await patient.reload();
     await expect(patient.getByRole("log")).toContainText("Let's review this section another way");
     const { default: AxeBuilder } = await import("@axe-core/playwright");
     expect((await new AxeBuilder({ page: patient }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze()).violations).toEqual([]);
     expect(await patient.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await patient.screenshot({ path: "test-results/patient-mobile.png", fullPage: true });
-    await patient.getByRole("button", { name: "Sign out of review", exact: true }).click();
-    await expect(patient.getByRole("heading", { name: "Welcome", exact: true })).toBeVisible();
+    await patient.getByRole("button", { name: "Sign out", exact: true }).click();
+    await expect(patient.getByRole("heading", { name: "Patient sign in", exact: true })).toBeVisible();
     await patient.reload();
     await expect(patient.getByRole("log")).toHaveCount(0);
     expect((await context.request.get(`http://127.0.0.1:4174/api/sessions/${id}`)).status()).toBe(401);
@@ -383,4 +665,38 @@ test("scoped coordinator cannot see prior account data or admin controls", async
   await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
   await expect(page.getByText("Coordinator accounts", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Voice setup", { exact: true })).toHaveCount(0);
+});
+
+
+test("username invitations appear on the patient homepage and stay accessible after login", async ({ page, browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  try {
+    const patient = await context.newPage();
+    await patient.goto("http://127.0.0.1:4174/patient");
+    await patient.getByRole("button", { name: "New here? Create an account" }).click();
+    await patient.getByLabel("Username", { exact: true }).fill("homepage-patient");
+    await patient.getByLabel("Password", { exact: true }).fill("homepage-test-password");
+    await patient.getByRole("button", { name: "Create account", exact: true }).click();
+    await expect(patient.getByRole("heading", { name: "Your first study starts here" })).toBeVisible();
+    await start(page);
+    await page.getByLabel("Patient username", { exact: true }).fill("homepage-patient");
+    await page.getByRole("button", { name: "Invite to study", exact: true }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Study added to homepage-patient's homepage." })).toBeVisible();
+    await patient.reload();
+    await expect(patient.getByText("New study", { exact: true })).toBeVisible();
+    await patient.screenshot({ path: "test-results/patient-home-mobile.png", fullPage: true });
+    const { default: AxeBuilder } = await import("@axe-core/playwright");
+    expect((await new AxeBuilder({ page: patient }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze()).violations).toEqual([]);
+    expect(await patient.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await patient.getByRole("button", { name: "Start review", exact: true }).click();
+    await expect(patient.getByRole("heading", { name: "Your understanding review" })).toBeVisible();
+    expect(await patient.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await patient.getByRole("link", { name: "My studies", exact: true }).click();
+    await expect(patient.getByText("In progress", { exact: true })).toBeVisible();
+    await patient.getByRole("button", { name: "Sign out", exact: true }).click();
+    await patient.getByLabel("Username", { exact: true }).fill("homepage-patient");
+    await patient.getByLabel("Password", { exact: true }).fill("homepage-test-password");
+    await patient.getByRole("button", { name: "Sign in", exact: true }).click();
+    await expect(patient.getByRole("button", { name: "Continue review", exact: true })).toBeVisible();
+  } finally { await context.close(); }
 });

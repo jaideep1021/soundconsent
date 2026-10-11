@@ -15,6 +15,11 @@ await writeFile(stateFile, JSON.stringify({ schemaVersion: 1, sessions: [], docu
   ],
 }] }));
 const ai: AiProvider = {
+  async classifyMessage(message) {
+    if (message.includes("?") || message.startsWith("Please explain")) return "question";
+    if (message === "okay") return "clarify";
+    return "response";
+  },
   async embed() { return [1, 0]; },
   async transcribeAudio() { return "understood: visits are voluntary"; },
   async createGuide(section, rephrase) { return { summary: `${rephrase ? "Rephrased: " : ""}${section.text}`, question: `What does ${section.title} explain?` }; },

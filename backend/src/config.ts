@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 import { HttpError } from "./errors.js";
 
 export interface Config {
+  logLevel?: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
+  trustProxy?: string[];
   notificationWebhookUrl?: string;
   notificationWebhookSecret?: string;
   notificationDeliveryEnabled?: boolean;
@@ -19,6 +21,7 @@ export interface Config {
   corsOrigins: string[];
   geminiApiKey: string;
   geminiModel: string;
+  geminiTranscriptionModel?: string;
   geminiEmbeddingModel: string;
   elevenLabsApiKey: string;
   elevenLabsVoiceId: string;
@@ -28,6 +31,11 @@ export interface Config {
 }
 
 export async function loadConfig(): Promise<Config> {
+  const logLevel = process.env.LOG_LEVEL?.trim() || "info";
+  if (!["fatal", "error", "warn", "info", "debug", "trace", "silent"].includes(logLevel)) {
+    throw new HttpError(500, "LOG_LEVEL must be fatal, error, warn, info, debug, trace or silent");
+  }
+  const trustProxy = (process.env.TRUST_PROXY ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
   const dataDir = resolve(process.env.DATA_DIR ?? "./data");
   const approvedFile = resolve(process.env.APPROVED_VERSIONS_FILE ?? `${dataDir}/approved-versions.json`);
   let value: unknown;
@@ -66,6 +74,8 @@ export async function loadConfig(): Promise<Config> {
   }
   if (notificationDeliveryEnabled && (!notificationWebhookUrl || notificationWebhookSecret.length < 32)) throw new HttpError(500, "Enable notification delivery only with an HTTPS webhook and a secret of at least 32 characters");
   return {
+    logLevel: logLevel as NonNullable<Config["logLevel"]>,
+    trustProxy,
     notificationWebhookUrl, notificationWebhookSecret, notificationDeliveryEnabled,
     bootstrapEmail: process.env.BOOTSTRAP_COORDINATOR_EMAIL?.trim() ?? "",
     bootstrapPassword: process.env.BOOTSTRAP_COORDINATOR_PASSWORD ?? "",
@@ -79,7 +89,8 @@ export async function loadConfig(): Promise<Config> {
     coordinatorApiKey: process.env.COORDINATOR_API_KEY?.trim() ?? "",
     corsOrigins,
     geminiApiKey: process.env.GEMINI_API_KEY?.trim() ?? "",
-    geminiModel: process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash",
+    geminiModel: process.env.GEMINI_MODEL?.trim() || "gemma-4-26b-a4b-it",
+    geminiTranscriptionModel: process.env.GEMINI_TRANSCRIPTION_MODEL?.trim() || "gemini-3.1-flash-lite",
     geminiEmbeddingModel: process.env.GEMINI_EMBEDDING_MODEL?.trim() || "gemini-embedding-001",
     elevenLabsApiKey: process.env.ELEVENLABS_API_KEY?.trim() ?? "",
     elevenLabsVoiceId: process.env.ELEVENLABS_VOICE_ID?.trim() ?? "",

@@ -1,63 +1,52 @@
-import React, { useState } from "react";
-import { ArrowUp, Mic } from "lucide-react";
+import { useRef, type ReactNode } from "react";
+import { ArrowUp, LoaderCircle, Mic, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface ChatInputProps {
-  onSendMessage: (message: string) => void;
-  disabled?: boolean;
-  onVoiceClick?: () => void;
+  text: string;
+  onTextChange: (text: string) => void;
+  onSend: () => void;
+  disabled: boolean;
+  dictationStatus: "idle" | "starting" | "recording" | "transcribing";
+  onDictate: () => void;
+  voiceControl: ReactNode;
 }
 
-export const ChatInput: React.FC<ChatInputProps> = ({
-  onSendMessage,
-  disabled,
-  onVoiceClick,
-}) => {
-  const [text, setText] = useState("");
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (text.trim() && !disabled) {
-      onSendMessage(text.trim());
-      setText("");
-    }
-  };
-
-  return (
-    <form
-      onSubmit={handleSubmit}
-      className="flex items-center gap-2 p-2 bg-off-white border border-border rounded-full focus-within:border-border-interactive transition-colors shadow-sm"
-    >
-      <input
-        type="text"
-        aria-label="Your response or question"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder="Type your response or question..."
-        disabled={disabled}
-        className="min-w-0 flex-1 bg-transparent px-4 py-2 text-sm text-charcoal placeholder-muted-foreground focus:outline-none"
-      />
-      {onVoiceClick && (
-        <Button
-          type="button"
-          size="icon"
-          variant="ghost"
-          onClick={onVoiceClick}
-          className="h-11 w-11 text-muted-foreground hover:text-charcoal rounded-full"
-          aria-label="Switch to Voice"
-        >
-          <Mic className="w-4 h-4" />
+export function ChatInput({ text, onTextChange, onSend, disabled, dictationStatus, onDictate, voiceControl }: ChatInputProps) {
+  const form = useRef<HTMLFormElement>(null);
+  const dictating = dictationStatus !== "idle";
+  const micLabel = dictationStatus === "recording" ? "Stop dictation" : dictationStatus === "transcribing" ? "Transcribing…" : dictationStatus === "starting" ? "Connecting microphone…" : "Dictate message";
+  return <form ref={form} aria-label="Message composer" onSubmit={(event) => {
+    event.preventDefault();
+    if (!disabled && !dictating && text.trim()) onSend();
+  }} className="border-t border-border bg-off-white p-3 sm:p-4 space-y-3">
+    <div className="flex justify-end">{voiceControl}</div>
+    <label htmlFor="review-text" className="sr-only">Your message</label>
+    <div className="rounded-2xl border border-border bg-cream p-2 focus-within:ring-2 focus-within:ring-ring">
+      <textarea id="review-text" required maxLength={5000} value={text} disabled={disabled || dictating}
+        onChange={(event) => onTextChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+            event.preventDefault();
+            form.current?.requestSubmit();
+          }
+        }}
+        aria-describedby="composer-help" placeholder="Ask a question or explain what you understand…"
+        className="block w-full min-h-24 max-h-60 resize-y bg-transparent p-2 text-base focus:outline-none disabled:opacity-60" />
+      <div className="flex items-center justify-between gap-2">
+        <Button type="button" size="icon" variant={dictationStatus === "recording" ? "destructive" : "ghost"}
+          aria-label={micLabel} title={micLabel} aria-pressed={dictationStatus === "recording"}
+          disabled={disabled || dictationStatus === "starting" || dictationStatus === "transcribing"} onClick={onDictate} className="size-11 rounded-full">
+          {dictationStatus === "recording" ? <Square className="size-4" /> : dictationStatus === "idle" ? <Mic className="size-5" /> : <LoaderCircle className="size-5 animate-spin" />}
         </Button>
-      )}
-      <Button
-        type="submit"
-        size="icon"
-        disabled={!text.trim() || disabled}
-        className="h-11 w-11 bg-charcoal text-off-white rounded-full disabled:opacity-40 hover:bg-charcoal/90 transition-opacity"
-        aria-label="Send message"
-      >
-        <ArrowUp className="w-4 h-4" />
-      </Button>
-    </form>
-  );
-};
+        <Button type="submit" size="icon" className="size-11 rounded-full" aria-label="Send message" disabled={disabled || dictating || !text.trim()}><ArrowUp className="size-5" /></Button>
+      </div>
+    </div>
+    <p id="composer-help" role="status" className="text-xs text-muted-foreground">
+      {dictationStatus === "recording" ? "Listening… Click the microphone again to stop and transcribe. Recording stops after 2 minutes."
+        : dictationStatus === "transcribing" ? "Transcribing your words into a draft…"
+        : dictationStatus === "starting" ? "Allow microphone access to start dictating."
+        : "Enter to send · Shift + Enter for a new line. Dictation adds a draft for you to review before sending."}
+    </p>
+  </form>;
+}

@@ -20,6 +20,7 @@ import type { AiProvider, ConsentSection, GroundedAnswer } from "./types.js";
 import { audioResponse } from "./voice.js";
 
 class FakeAi implements AiProvider {
+  async classifyMessage(): Promise<"response"> { return "response"; }
   grades = [false, false, true];
   rephrases: boolean[] = [];
   async transcribeAudio(): Promise<string> { return "I understand the study visits."; }
@@ -137,6 +138,33 @@ test("Gemini grounding check replaces unsupported generated claims with the safe
   }
 });
 
+test("Gemini retries transient provider failures, bounds retries and preserves permanent errors", async () => {
+  const originalFetch = globalThis.fetch;
+  const provider = new GeminiProvider("test-api-key", "test-model", "test-embedding");
+  try {
+    for (const status of [429, 503]) {
+      let calls = 0;
+      const bodies: unknown[] = [];
+      globalThis.fetch = async (_input, init) => {
+        bodies.push(init?.body);
+        return ++calls === 1
+          ? new Response("busy", { status, headers: { "retry-after": "0" } })
+          : new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"pass":true}' }] } }] }));
+      };
+      assert.equal(await provider.grade({ id: "purpose", title: "Purpose", text: "Monthly visits", embedding: [] }, "Monthly visits"), true);
+      assert.equal(calls, 2);
+      assert.equal(bodies[0], bodies[1]);
+    }
+    for (const [status, retryAfter, expectedCalls] of [[429, "0", 3], [429, "120", 1], [400, "0", 1]] as const) {
+      let calls = 0;
+      globalThis.fetch = async () => { calls++; return new Response("failed", { status, headers: { "retry-after": retryAfter } }); };
+      await assert.rejects(provider.embed("Monthly visits"), (error: unknown) => error instanceof HttpError &&
+        (status === 429 ? error.statusCode === 503 && /temporarily busy/.test(error.message) : error.statusCode === 502));
+      assert.equal(calls, expectedCalls);
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("Gemini transcribes uploaded audio and never responds to instructions inside it", async () => {
   const originalFetch = globalThis.fetch;
   let requestBody = "";
@@ -158,7 +186,49 @@ test("Gemini transcribes uploaded audio and never responds to instructions insid
   }
 });
 
-test("ElevenLabs provisions a Gemini-backed conversational agent with protected session tools", async () => {
+test("Gemma uses final JSON output and keeps audio transcription on its own model", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+    return Response.json({ candidates: [{ content: { parts: [
+      { thought: true, text: "Internal reasoning is not a JSON response." },
+      { text: String(url).includes("audio-model") ? '{"transcript":"Monthly visits"}' : '[{"intent":"question"}]' },
+    ] } }] });
+  };
+  try {
+    const provider = new GeminiProvider("test-key", "gemma-4-26b-a4b-it", "embedding-model", "audio-model");
+    assert.equal(await provider.classifyMessage("When are visits?", {
+      section: { id: "purpose", title: "Purpose", text: "Monthly visits", embedding: [] }, guide: null, recentMessages: [],
+    }), "question");
+    assert.equal(await provider.transcribeAudio(Buffer.from("synthetic audio"), "audio/wav"), "Monthly visits");
+    assert.match(requests[0]!.url, /gemma-4-26b-a4b-it:generateContent/);
+    assert.deepEqual(requests[0]!.body["generationConfig"], { responseMimeType: "application/json", temperature: 0, thinkingConfig: { thinkingLevel: "minimal" } });
+    assert.match(requests[1]!.url, /audio-model:generateContent/);
+    assert.deepEqual(requests[1]!.body["generationConfig"], { responseMimeType: "application/json", temperature: 0 });
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("provider daily quota and long RetryInfo delays fail without futile retries", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const daily of [true, false]) {
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls++;
+        return Response.json({ error: { details: [
+          ...(daily ? [{ "@type": "type.googleapis.com/google.rpc.QuotaFailure", violations: [{ quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier" }] }] : []),
+          { "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "63871s" },
+        ] } }, { status: 429 });
+      };
+      const provider = new GeminiProvider("test-key", "test-model", "test-embedding");
+      await assert.rejects(provider.embed("Monthly visits"), daily ? /daily usage limit/ : /temporarily busy/);
+      assert.equal(calls, 1);
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("ElevenLabs provisions browser tools without exposing webhook secrets or requiring a tunnel", async () => {
   const data = await fixture();
   const originalFetch = globalThis.fetch;
   const requests: Array<{ url: string; method: string; headers: Headers; body?: string }> = [];
@@ -214,19 +284,30 @@ test("ElevenLabs provisions a Gemini-backed conversational agent with protected 
     const toolRequests = requests.filter((request) => request.url.endsWith("/tools") && request.method === "POST");
     assert.equal(toolRequests.length, 2);
     assert.ok(toolRequests.every((request) => request.headers.get("xi-api-key") === "elevenlabs-test-key"));
-    assert.ok(toolRequests.every((request) => request.body?.includes("https://consent.example.org/api/elevenlabs/tools/")));
-    assert.ok(toolRequests.every((request) => request.body?.includes(`Bearer ${"a".repeat(40)}`)));
+    for (const request of toolRequests) {
+      const tool = JSON.parse(request.body!).tool_config;
+      assert.equal(tool.type, "client");
+      assert.equal(tool.expects_response, true);
+      assert.equal(tool.api_schema, undefined);
+      assert.ok(!request.body!.includes("Bearer"));
+      assert.ok(!request.body!.includes("sessionAccess"));
+      assert.ok(!request.body!.includes("expectedRevision"));
+    }
     const createdAgent = requests.find((request) => request.url.endsWith("/agents/create"));
     assert.ok(createdAgent?.body);
     const agentBody = JSON.parse(createdAgent.body) as {
       conversation_config: {
         agent: { prompt: { llm: string; tool_ids: string[]; prompt: string }; first_message: string };
         tts: { model_id: string };
+        conversation: { client_events: string[] };
       };
       platform_settings: { auth: { enable_auth: boolean }; privacy: { record_voice: boolean } };
     };
     assert.equal(agentBody.conversation_config.agent.prompt.llm, "gemini-2.5-flash");
     assert.equal(agentBody.conversation_config.tts.model_id, "eleven_turbo_v2");
+    for (const event of ["audio", "interruption", "ping", "user_transcript", "agent_response", "client_tool_call"]) {
+      assert.ok(agentBody.conversation_config.conversation.client_events.includes(event), `Missing streaming event: ${event}`);
+    }
     assert.deepEqual(agentBody.conversation_config.agent.prompt.tool_ids, ["tool-1", "tool-2"]);
     assert.match(agentBody.conversation_config.agent.prompt.prompt, /never invent facts/i);
     assert.equal(agentBody.conversation_config.agent.first_message, "{{opening_message}}");
@@ -534,4 +615,36 @@ test("HTTP API health, coordinator auth, and patient response validation", async
     await app.close();
     await rm(data.directory, { recursive: true, force: true });
   }
+});
+
+test("Gemini intent classification uses redacted review context and rejects invalid output", async () => {
+  const originalFetch = globalThis.fetch;
+  let output: unknown = { intent: "question" };
+  let body = "";
+  globalThis.fetch = async (_input, init) => {
+    body = String(init?.body);
+    return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify(output) }] } }] });
+  };
+  try {
+    const ai = new GeminiProvider("test-key", "test-model", "test-embedding");
+    const context = {
+      section: { id: "purpose", title: "Purpose", text: "Visits are monthly.", embedding: [1, 0] },
+      guide: { summary: "Visits are monthly.", question: "Explain the visits in your own words." },
+      recentMessages: [{ role: "patient" as const, content: "Contact patient@example.com" }],
+    };
+    assert.equal(await ai.classifyMessage("Please explain visits; email patient@example.com", context), "question");
+    assert.ok(!body.includes("patient@example.com"));
+    assert.ok(body.includes("[REDACTED_EMAIL]"));
+    assert.ok(body.includes(context.guide.question));
+    assert.match(body, /do not rely on punctuation/);
+    assert.match(body, /prioritize question/);
+    for (const intent of ["response", "clarify"] as const) {
+      output = { intent };
+      assert.equal(await ai.classifyMessage("A patient message", context), intent);
+    }
+    output = { intent: "skip" };
+    await assert.rejects(ai.classifyMessage("skip this", context), /invalid message intent/);
+    output = { intent: true };
+    await assert.rejects(ai.classifyMessage("yes", context), /invalid message intent/);
+  } finally { globalThis.fetch = originalFetch; }
 });

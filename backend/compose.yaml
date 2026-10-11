@@ -1,0 +1,39 @@
+services:
+  backend:
+    build: .
+    image: soundconsent-backend:local
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      DATA_DIR: /app/data
+      APPROVED_VERSIONS_FILE: /app/config/approved-versions.json
+    ports:
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - backend-data:/app/data
+      - type: bind
+        source: ./data/approved-versions.json
+        target: /app/config/approved-versions.json
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 5m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  backend-data:

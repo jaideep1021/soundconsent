@@ -12,29 +12,25 @@ const TOOL_NAMES = {
 const AGENT_PROMPT = [
   "You are a voice assistant that helps a participant understand an informed consent form.",
   "You are not a clinician, cannot give medical advice, and cannot obtain or record consent.",
-  "For every question about the study, call answer_consent_question and base your reply only on its answer.",
-  "For every response to a teach-back question, call submit_teach_back and speak only the returned message.",
-  "Start with review revision {{session_revision}}. For every tool call supply expectedRevision as that revision string and a new requestId of at least 8 letters/digits. Reuse the same requestId when retrying that call. After success use the returned revision for the next call. On a conflict stop and ask the participant to refresh the review and restart voice. Never retry a conflict using a new revision or new requestId.",
+  `For every question about the study, call ${TOOL_NAMES.answer} and base your reply only on its answer or message.`,
+  `For every response to a teach-back question, call ${TOOL_NAMES.response} and speak only the returned message.`,
+  "The app supplies session access, revision checks, and retry IDs. Supply only the participant words to the tools. Wait for the tool result before replying. If a tool fails, explain that processing failed and suggest ending voice mode and trying the text chat. Do not ask the participant to repeat an answer that was already transcribed, and do not invent a grade or advance the review.",
   "Never invent facts, interpret medical details, decide whether the participant should join, or claim a response passed unless the tool says so.",
   "For emergencies, follow the tool's immediate safety instructions. If a question is unsupported, tell the participant to ask their doctor.",
   "A human study team member must conduct the final consent discussion. The participant may ask for a human at any time.",
 ].join(" ");
 
 interface ToolConfig {
-  type: "webhook";
+  type: "client";
   name: string;
   description: string;
   response_timeout_secs: number;
+  expects_response: true;
   interruption_mode: "disable_during_tool_and_turn";
-  api_schema: {
-    url: string;
-    method: "POST";
-    request_headers: Record<string, string>;
-    request_body_schema: {
-      type: "object";
-      required: string[];
-      properties: Record<string, { type: "string"; description?: string; dynamic_variable?: string }>;
-    };
+  parameters: {
+    type: "object";
+    required: string[];
+    properties: Record<string, { type: "string"; description: string }>;
   };
 }
 
@@ -47,13 +43,10 @@ export class ElevenLabsAgentService {
 
   async provision(name = "Teach-It-Back Consent Companion"): Promise<{ agentId: string; updated: boolean }> {
     this.assertApiConfigured();
-    const baseUrl = parsePublicBaseUrl(this.config.publicBaseUrl);
-    if (!this.config.elevenLabsToolApiKey || this.config.elevenLabsToolApiKey.length < 32) {
-      throw new HttpError(503, "ELEVENLABS_TOOL_API_KEY must be configured with at least 32 characters");
-    }
-
-    const answerToolId = await this.ensureTool(TOOL_NAMES.answer, createAnswerTool(baseUrl, this.config.elevenLabsToolApiKey));
-    const responseToolId = await this.ensureTool(TOOL_NAMES.response, createResponseTool(baseUrl, this.config.elevenLabsToolApiKey));
+    const answerToolId = await this.ensureTool(TOOL_NAMES.answer, createClientTool(TOOL_NAMES.answer, "question",
+      "Use for every participant question about the study or consent form. The authenticated app returns a source-grounded answer or the required clinician fallback."));
+    const responseToolId = await this.ensureTool(TOOL_NAMES.response, createClientTool(TOOL_NAMES.response, "response",
+      "Use whenever the participant responds to a teach-back question. The authenticated app processes the response and returns the safe next message."));
     const existingId = this.config.elevenLabsAgentId || this.store.getElevenLabsAgentId();
     const body = {
       name,
@@ -65,7 +58,8 @@ export class ElevenLabsAgentService {
         },
         conversation: {
           max_duration_seconds: 600,
-          client_events: ["conversation_initiation_metadata", "user_transcript", "agent_response", "agent_response_complete", "agent_tool_request", "agent_tool_response"],
+          // WebSocket voice output requires audio events; interruption clears queued speech.
+          client_events: ["audio", "interruption", "ping", "conversation_initiation_metadata", "user_transcript", "agent_response", "agent_response_complete", "agent_tool_request", "agent_tool_response", "client_tool_call"],
         },
         agent: {
           first_message: "{{opening_message}}",
@@ -192,70 +186,16 @@ export function requireElevenLabsTool(request: FastifyRequest, config: Config): 
   }
 }
 
-function createAnswerTool(baseUrl: string, secret: string): ToolConfig {
+function createClientTool(name: string, field: string, description: string): ToolConfig {
   return {
-    type: "webhook",
-    name: TOOL_NAMES.answer,
-    description: "Use for every participant question about the study or consent form. Returns a Gemini-grounded answer or the required clinician fallback.",
-    response_timeout_secs: 60,
+    type: "client", name, description, expects_response: true,
+    response_timeout_secs: 120,
     interruption_mode: "disable_during_tool_and_turn",
-    api_schema: {
-      url: `${baseUrl}/elevenlabs/tools/questions`,
-      method: "POST",
-      request_headers: { authorization: `Bearer ${secret}` },
-      request_body_schema: {
-        type: "object",
-        required: ["sessionId", "sessionAccess", "question", "requestId", "expectedRevision"],
-        properties: {
-          sessionId: { type: "string", dynamic_variable: "session_id" },
-          requestId: { type: "string", description: "Unique ID for this participant turn, at least 8 letters/digits. Reuse exactly on retries." },
-          expectedRevision: { type: "string", description: "Last returned review revision, initially session_revision. Stop on conflict." },
-          sessionAccess: { type: "string", dynamic_variable: "session_access" },
-          question: { type: "string", description: "The participant's question, exactly as spoken." },
-        },
-      },
+    parameters: {
+      type: "object", required: [field],
+      properties: { [field]: { type: "string", description: "The participant's words exactly as spoken. Do not paraphrase or add facts." } },
     },
   };
-}
-
-function createResponseTool(baseUrl: string, secret: string): ToolConfig {
-  return {
-    type: "webhook",
-    name: TOOL_NAMES.response,
-    description: "Use whenever the participant responds to a teach-back question. Grades only against the active consent section and returns the safe next message.",
-    response_timeout_secs: 60,
-    interruption_mode: "disable_during_tool_and_turn",
-    api_schema: {
-      url: `${baseUrl}/elevenlabs/tools/responses`,
-      method: "POST",
-      request_headers: { authorization: `Bearer ${secret}` },
-      request_body_schema: {
-        type: "object",
-        required: ["sessionId", "sessionAccess", "response", "requestId", "expectedRevision"],
-        properties: {
-          sessionId: { type: "string", dynamic_variable: "session_id" },
-          requestId: { type: "string", description: "Unique ID for this participant turn, at least 8 letters/digits. Reuse exactly on retries." },
-          expectedRevision: { type: "string", description: "Last returned review revision, initially session_revision. Stop on conflict." },
-          sessionAccess: { type: "string", dynamic_variable: "session_access" },
-          response: { type: "string", description: "The participant's teach-back response, exactly as spoken." },
-        },
-      },
-    },
-  };
-}
-
-function parsePublicBaseUrl(value: string): string {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new HttpError(503, "PUBLIC_BASE_URL must be configured for ElevenLabs webhook tools");
-  }
-  const localHttp = parsed.protocol === "http:" && ["localhost", "127.0.0.1"].includes(parsed.hostname);
-  if ((!localHttp && parsed.protocol !== "https:") || parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new HttpError(400, "PUBLIC_BASE_URL must be an HTTPS URL without credentials, query, or fragment");
-  }
-  return parsed.toString().replace(/\/$/, "");
 }
 
 function readStringProperty(value: unknown, property: string): string | undefined {

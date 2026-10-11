@@ -14,9 +14,17 @@ import type { AiProvider } from "./types.js";
 const origin = "http://localhost:5173";
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), "soundconsent-workflow-"));
-  let grades = 0; let transcriptions = 0; let embeddings = 0;
+  let grades = 0; let transcriptions = 0; let embeddings = 0; let classifications = 0;
+  const transcriptionMimes: string[] = [];
   const ai: AiProvider = {
-    async embed() { embeddings++; return [1, 0]; }, async transcribeAudio() { transcriptions++; return "understood"; },
+    async classifyMessage(message) {
+      classifications++;
+      if (message === "classifier failure") throw new Error("Provider unavailable");
+      if (message.includes("?") || message.startsWith("Please explain")) return "question";
+      if (message === "okay") return "clarify";
+      return "response";
+    },
+    async embed() { embeddings++; return [1, 0]; }, async transcribeAudio(_bytes, mime) { transcriptions++; transcriptionMimes.push(mime); return "understood"; },
     async createGuide(s) { return { summary: s.text, question: "Explain this section" }; },
     async grade(_s, response) { grades++; return response.startsWith("understood"); },
     async answerQuestion() { return { answer: "Please ask your doctor.", citations: [], requiresClinician: true }; }, async verifyAnswer() { return true; },
@@ -30,7 +38,7 @@ async function fixture() {
   const request = (method: "GET" | "POST", url: string, payload?: object, headers: Record<string, string> = {}) => app.inject({ method, url, headers: { cookie, origin, ...headers }, ...(payload ? { payload } : {}) });
   const start = async (documentId = doc.id, key = "") => { const r = await request("POST", "/sessions", { documentId }, key ? { "idempotency-key": key } : {}); assert.equal(r.statusCode, 201, r.body); return r.json().sessionId as string; };
   const patient = async (id: string) => { const invite = (await request("POST", `/sessions/${id}/invitations`)).json(); const r = await request("POST", `/sessions/${id}/access`, invite, { cookie: "" }); assert.equal(r.statusCode, 200, r.body); return { cookie: String(r.headers["set-cookie"]).split(";")[0]! }; };
-  return { get app() { return app; }, request, start, patient, doc, store, config, get counts() { return { grades, embeddings, transcriptions }; }, async restart() { await app.close(); app = await createApp({ config, ai }); }, async cleanup() { await app.close(); await rm(directory, { recursive: true, force: true }); } };
+  return { get app() { return app; }, request, start, patient, doc, store, config, transcriptionMimes, get counts() { return { grades, embeddings, transcriptions, classifications }; }, async restart() { await app.close(); app = await createApp({ config, ai }); }, async cleanup() { await app.close(); await rm(directory, { recursive: true, force: true }); } };
 }
 
 test("durable request replay, concurrent duplicate exclusion, revision conflicts and audio replay", async () => {
@@ -164,5 +172,86 @@ test("new coordinator routes enforce study and administrator boundaries", async 
     assert.equal((await f.request("POST", "/studies/__proto__/settings", { revision: 0, maxAttempts: 3, reminderDays: 5, notificationsEnabled: true })).statusCode, 200);
     assert.equal((await f.request("GET", "/studies/__proto__/settings")).json().maxAttempts, 3);
     assert.equal((await f.request("GET", "/studies/unrelated/settings")).json().maxAttempts, 2);
+  } finally { await f.cleanup(); }
+});
+
+test("dictation is authorized and transcribes without persisting or grading a response", async () => {
+  const f = await fixture(); try {
+    const id = await f.start();
+    const patient = await f.patient(id);
+    const before = (await f.request("GET", `/sessions/${id}`)).json();
+    const transcribe = (cookie: string, mime = "audio/webm", content = "fixture") => f.app.inject({
+      method: "POST", url: `/sessions/${id}/transcription`,
+      headers: { origin, cookie, "content-type": "multipart/form-data; boundary=test" },
+      payload: Buffer.from(`--test\r\nContent-Disposition: form-data; name="file"; filename="dictation"\r\nContent-Type: ${mime}\r\n\r\n${content}\r\n--test--\r\n`),
+    });
+    assert.equal((await transcribe("")).statusCode, 401);
+    const otherPatient = await f.patient(await f.start());
+    assert.equal((await transcribe(otherPatient.cookie)).statusCode, 401);
+    assert.equal((await transcribe(patient.cookie, "text/plain")).statusCode, 415);
+    assert.equal((await transcribe(patient.cookie, "audio/webm", "")).statusCode, 413);
+    const result = await transcribe(patient.cookie, "audio/webm;codecs=opus");
+    assert.equal(result.statusCode, 200, result.body);
+    assert.deepEqual(result.json(), { text: "understood" });
+    assert.equal(f.counts.transcriptions, 1);
+    assert.equal(f.counts.grades, 0);
+    assert.deepEqual((await f.request("GET", `/sessions/${id}`)).json(), before);
+    assert.equal((await transcribe(patient.cookie, "audio/mp4")).statusCode, 200);
+    assert.deepEqual(f.transcriptionMimes, ["audio/webm", "audio/m4a"]);
+    await f.request("POST", `/sessions/${id}/responses`, { response: "understood" });
+    await f.request("POST", `/sessions/${id}/responses`, { response: "understood" });
+    assert.equal((await transcribe(patient.cookie)).statusCode, 409);
+  } finally { await f.cleanup(); }
+});
+
+test("unified messages route intent without consuming attempts for questions or clarification", async () => {
+  const f = await fixture(); try {
+    const id = await f.start();
+    const url = `/sessions/${id}/messages`;
+    const patient = await f.patient(id);
+    const send = (message: string, key: string, revision: number) => f.request("POST", url, { message }, { ...patient, "idempotency-key": key, "if-match": String(revision) });
+    assert.equal((await f.request("POST", url, { message: "hello" }, { cookie: "" })).statusCode, 401);
+    const other = await f.patient(await f.start());
+    assert.equal((await f.request("POST", url, { message: "hello" }, other)).statusCode, 401);
+    assert.equal((await f.request("POST", url, { message: 1 })).statusCode, 400);
+    assert.equal((await f.request("POST", url, { message: " " })).statusCode, 400);
+    assert.equal((await f.request("POST", url, { message: "x".repeat(5001) })).statusCode, 400);
+    const question = await send("Please explain the visits", "question-msg-1", 0);
+    assert.equal(question.statusCode, 200, question.body);
+    assert.equal(question.json().intent, "question");
+    assert.equal(question.json().revision, 1);
+    assert.equal(f.counts.grades, 0);
+    assert.equal((await f.request("GET", `/sessions/${id}`)).json().attemptsForCurrentSection, 0);
+    const mixed = await send("understood: visits are monthly, but are they required?", "mixed-msg-1", 1);
+    assert.equal(mixed.json().intent, "question");
+    assert.equal(f.counts.grades, 0);
+    const clarification = await send("okay", "clarify-msg-1", 2);
+    assert.equal(clarification.json().intent, "clarify");
+    assert.equal(f.counts.grades, 0);
+    assert.equal((await f.request("GET", `/sessions/${id}`)).json().section.index, 1);
+    const beforeFailure = (await f.request("GET", `/sessions/${id}`)).json();
+    assert.equal((await send("classifier failure", "failure-msg-1", 3)).statusCode, 500);
+    assert.deepEqual((await f.request("GET", `/sessions/${id}`)).json(), beforeFailure);
+    const classifications = f.counts.classifications;
+    const handoff = await send("I need a human", "human-msg-1", 3);
+    assert.equal(handoff.json().requiresClinician, true);
+    assert.equal(f.counts.classifications, classifications);
+    assert.equal(f.counts.grades, 0);
+    const responses = await Promise.all([
+      send("understood: visits are monthly", "response-msg-1", 4),
+      send("understood: visits are monthly", "response-msg-1", 4),
+    ]);
+    assert.equal(responses[0]!.statusCode, 200, responses[0]!.body);
+    assert.deepEqual(responses[0]!.json(), responses[1]!.json());
+    assert.equal(responses[0]!.json().intent, "response");
+    assert.equal(responses[0]!.json().section.index, 2);
+    assert.equal(f.counts.classifications, classifications + 1);
+    assert.equal(f.counts.grades, 1);
+    assert.equal((await send("a different answer", "response-msg-1", 4)).statusCode, 409);
+    assert.equal((await send("understood: old answer", "stale-msg-1", 4)).statusCode, 409);
+    assert.equal(f.counts.classifications, classifications + 1);
+    await f.restart();
+    assert.deepEqual((await send("understood: visits are monthly", "response-msg-1", 4)).json(), responses[0]!.json());
+    assert.equal(f.counts.grades, 1);
   } finally { await f.cleanup(); }
 });

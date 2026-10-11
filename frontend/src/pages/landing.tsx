@@ -73,7 +73,7 @@ export default function LandingPage() {
               size="sm"
               className="bg-charcoal text-off-white hover:bg-charcoal/90 shadow-[var(--shadow-inset-button)]"
             >
-              <Link to="/patient">Patient Access</Link>
+              <Link to="/patient">Patient Sign In</Link>
             </Button>
           </nav>
         </div>

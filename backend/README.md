@@ -4,7 +4,7 @@ This self-contained TypeScript API implements the backend items in `../action-it
 
 ## Run locally
 
-Requires Node.js 20.16 or newer. From this directory:
+Requires Node.js 24 or newer. The Docker image uses Node.js 24. From this directory:
 
 ```sh
 npm ci
@@ -15,20 +15,66 @@ npm run dev
 
 `npm run build` compiles to `dist/`, `npm start` runs the compiled server, and `npm test` runs offline tests. Gemini credentials are required to ingest documents and run RAG, teach-back grading, grounding checks, and recorded-audio transcription. ElevenLabs credentials are used for speech and its Conversational AI agent.
 
+## Deploy with Docker
+
+Run these commands from `backend/` (or build from the repository root with `docker build -t soundconsent-backend ./backend`). The multi-stage image contains compiled application code and locked production dependencies, runs as UID/GID `1000:1000`, and excludes `.env`, saved state, audit logs, tests, and local dependencies from the final image.
+
+1. Copy `.env.example` to `.env` if you have not configured it already; restrict it with `chmod 600 .env`. Set `GEMINI_API_KEY`, the two first-start `BOOTSTRAP_COORDINATOR_*` values, and `CORS_ORIGIN` to your exact frontend HTTPS origin, for example `https://consent.example.org`. Configure ElevenLabs only if using voice. Keep notification delivery disabled unless you intend to send real notifications.
+2. Replace `data/approved-versions.json` with your controlled study/version allow-list. The checked-in entries are examples. Compose mounts this file read-only; the bare image defaults to an empty allow-list and cannot approve uploads until one is supplied.
+3. Start the single backend container:
+
+   ```sh
+   docker compose up -d --build
+   docker compose ps
+   curl --fail http://127.0.0.1:3001/health
+   docker compose logs --tail=100 backend
+   ```
+
+4. Put an HTTPS reverse proxy in front of it. Compose exposes port 3001 only on host loopback. Forward your frontend's `/api/` to `http://127.0.0.1:3001/`, stripping `/api`. Preserve the browser's `Origin` header. A proxy in another container should share a private Docker network and use `backend:3001` instead. Configure `TRUST_PROXY` with only that proxy's IP address or CIDR and have the proxy overwrite forwarded headers; this lets authentication throttles use client IPs. With no trusted proxy configured, requests are throttled using their direct peer IP.
+5. Sign in over HTTPS, verify provider-backed document ingestion and any enabled voice workflow, then remove both bootstrap values from `.env` and run `docker compose up -d --force-recreate backend`. Account credentials persist in the volume.
+
+Compose fixes the internal port and data/config paths regardless of local `.env` values, sets `NODE_ENV=production` (Secure cookies), uses a read-only root filesystem, and mounts a writable named volume at `/app/data`. `SameSite=Strict` cookies require a same-origin or same-site frontend; unrelated frontend/backend domains will not work. The HTTP health request above works without authentication; browser authentication must use HTTPS.
+
+For a deployment without Compose:
+
+```sh
+docker build --pull -t soundconsent-backend .
+docker volume create soundconsent-data
+docker run -d --name soundconsent-backend --init --restart unless-stopped \
+  --stop-timeout 300 --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --env-file .env -e NODE_ENV=production -e PORT=3001 \
+  -e DATA_DIR=/app/data -e APPROVED_VERSIONS_FILE=/app/config/approved-versions.json \
+  -p 127.0.0.1:3001:3001 \
+  --mount type=volume,source=soundconsent-data,target=/app/data \
+  --mount "type=bind,source=$(pwd)/data/approved-versions.json,target=/app/config/approved-versions.json,readonly" \
+  soundconsent-backend
+```
+
+Operate **one process/replica per data volume**. The JSON store and authentication throttles are not shared across replicas; use stop-then-start updates, not overlapping rolling deployments. New named volumes inherit the image's data-directory ownership. For a host bind mount or restored volume, prepare it as UID/GID `1000:1000` with owner-only access. Existing local `data/state.json` and `data/audit.jsonl` are **not** copied into a new volume: stop all writers, back up and migrate both files together, and set their ownership before starting Docker. Otherwise Docker initializes a separate empty deployment.
+
+Back up the entire data volume and the approved-version configuration while the container is stopped (`docker compose stop backend`), then restart it (`docker compose start backend`). Keep encrypted backups and test restoration to a separate volume. `docker compose down` retains data; `docker compose down -v` deletes it. On updates, back up first and rebuild with `docker compose build --pull`, then `docker compose up -d`. Do not replace a working volume with an empty one when rolling back an image.
+
+`GET /health` is a local liveness check after storage initialization; it does not validate external credentials, provider quotas, or clinical readiness. Docker checks it every 30 seconds. Restart policies recover exited processes, not containers that are merely marked unhealthy; configure your host's monitoring accordingly. Startup and server errors go to stdout/stderr as structured logs (`LOG_LEVEL=info` by default); automatic request logging is disabled to keep request URLs, headers, and cookies out of access logs. Compose rotates these logs. SIGTERM/SIGINT drain requests and the notification worker, with a 270-second application deadline and a 300-second container grace period.
+
+Before publishing an image, run `npm ci`, `npm run typecheck`, `npm test`, `npm run build`, and `npm audit --omit=dev`. The Docker build type-checks and compiles; offline tests run from the repository because PDF ingestion tests use `../sample_icfs`. The container makes this prototype hostable as a single instance; the storage and clinical-use limitations below still apply.
+
+`GEMINI_MODEL` selects the backend text model and defaults to `gemma-4-26b-a4b-it`, hosted through the same Google API key. `GEMINI_TRANSCRIPTION_MODEL` separately defaults to `gemini-3.1-flash-lite` because Gemma 26B does not accept audio. Embeddings retain `GEMINI_EMBEDDING_MODEL`. These settings do not change the ElevenLabs agent's conversational model or voice. Provider limits still apply: short transient failures receive bounded retries, while daily quota exhaustion is reported without repeated requests. Google `RetryInfo` delays are honored alongside `Retry-After` headers.
+
 ## ElevenLabs Conversational AI
 
-Set `ELEVENLABS_API_KEY`, a random server-only `ELEVENLABS_TOOL_API_KEY` (at least 32 characters), and `PUBLIC_BASE_URL` to a publicly reachable HTTPS URL for this backend. The ElevenLabs service must be able to reach the URL; localhost is not reachable from ElevenLabs. Optionally set `ELEVENLABS_VOICE_ID`.
+Set `ELEVENLABS_API_KEY` and optionally `ELEVENLABS_VOICE_ID`. Browser voice uses ElevenLabs client tools, executed by the signed-in app against its normal authenticated backend connection. No public tunnel is needed. The browser generates mutation IDs, serializes turns, and carries forward backend revisions; the language model supplies only the spoken message.
 
-Sign in through `/auth/login` and save cookies to `coordinator-cookies.txt` (or use Voice setup in the frontend). Provision or update the private voice agent and its authenticated webhook tools:
+Sign in through `/auth/login` and save cookies to `coordinator-cookies.txt` (or use Voice setup in the frontend). Provision or update the private voice agent and its browser tools:
 
 ```sh
 curl -X POST http://localhost:3001/agents/provision \
   -b coordinator-cookies.txt -H "Origin: http://localhost:5173"
 ```
 
-The backend creates/updates two ElevenLabs webhook tools that call Gemini-backed session question answering and teach-back grading. It attaches them to a Gemini `gemini-2.5-flash` Conversational AI agent, enables signed-URL authorization, disables voice recording, and stores the resulting agent/tool IDs in `DATA_DIR/state.json`. To start a voice conversation, first create a review session with `POST /sessions`, then request `GET /sessions/:id/conversation-url`. The response contains `signedUrl` and `dynamicVariables` (`session_id`, short-lived `session_access`, `session_revision`, and the initial disclosed opening message). Pass those dynamic variables when starting the ElevenLabs conversation; never expose either API key to the client.
+The backend creates/updates two ElevenLabs client tools that use the same Gemma-backed message processing as text chat. Re-provision existing agents once to replace old webhook tools; refresh the app before starting a new voice call. It attaches them to a Gemini `gemini-2.5-flash` Conversational AI agent, enables signed-URL authorization, disables voice recording, and stores the resulting agent/tool IDs in `DATA_DIR/state.json`. To start a voice conversation, first create a review session with `POST /sessions`, then request `GET /sessions/:id/conversation-url`. The response contains `signedUrl` and `dynamicVariables` (`session_id`, short-lived `session_access`, `session_revision`, and the initial disclosed opening message). Pass those dynamic variables when starting the ElevenLabs conversation; never expose either API key to the client.
 
-The webhook endpoints `/elevenlabs/tools/questions` and `/elevenlabs/tools/responses` require both the bearer token configured by `ELEVENLABS_TOOL_API_KEY` and the per-review `sessionAccess` capability populated from `session_access`. Tools also require `requestId` (8–100 letters, digits, underscores or hyphens) and `expectedRevision` (numeric string). Re-provision existing agents after upgrading so their tool schemas include these fields. A retried tool call must reuse its request ID; a revision conflict requires refreshing the review and restarting voice. Logout, expiry, account disablement, and review-access revocation invalidate the corresponding capabilities; calls already authorized and in progress can finish. Treat the signed conversation URL as a short-lived credential. Real ElevenLabs agent provisioning and live voice calls require valid provider credentials and were not exercised by the offline test suite.
+Legacy server-to-server integrations can still use the webhook endpoints `/elevenlabs/tools/questions` and `/elevenlabs/tools/responses` require both the bearer token configured by `ELEVENLABS_TOOL_API_KEY` and the per-review `sessionAccess` capability populated from `session_access`. Legacy webhook tools also require `requestId` (8–100 letters, digits, underscores or hyphens) and `expectedRevision` (numeric string). These legacy integrations require a reachable `PUBLIC_BASE_URL` and a server-only `ELEVENLABS_TOOL_API_KEY`; browser client tools require neither. A retried tool call must reuse its request ID; a revision conflict requires refreshing the review and restarting voice. Logout, expiry, account disablement, and review-access revocation invalidate the corresponding capabilities; calls already authorized and in progress can finish. Treat the signed conversation URL as a short-lived credential. Real ElevenLabs agent provisioning and live voice calls require valid provider credentials and were not exercised by the offline test suite.
 
 The bundled sample consent PDFs originate from ClinicalTrials.gov; consult the corresponding study records at `https://clinicaltrials.gov/study/<NCT_ID>`. The checked-in approved-version list contains only a synthetic demo entry; the historical sample PDFs are not treated as currently IRB-approved.
 
@@ -48,7 +94,9 @@ Coordinator routes require an authenticated HttpOnly session cookie and study pe
 | `POST` | `/documents` | Multipart PDF upload (`file`, `studyId`, optional `version`), maximum 20 MiB |
 | `POST` | `/sessions` | Start review (`documentId`) and return automated-agent disclosure plus first section |
 | `POST` | `/sessions/:id/responses` | Submit typed teach-back |
+| `POST` | `/sessions/:id/messages` | Infer intent from a message and review context; answer questions, grade teach-back attempts, or request clarification |
 | `POST` | `/sessions/:id/questions` | Ask a question answered from retrieved consent text or refused |
+| `POST` | `/sessions/:id/transcription` | Transcribe microphone audio into an editable draft without saving a turn, grading, or advancing the review |
 | `POST` | `/sessions/:id/audio` | Transcribe recorded audio using Gemini audio understanding, then process it as teach-back |
 | `POST` | `/sessions/:id/speech` | Return streamed ElevenLabs audio for the latest safe response |
 | `POST` | `/elevenlabs/tools/questions` | Authenticated ElevenLabs webhook for Gemini-grounded consent questions |
@@ -73,7 +121,7 @@ Use `BOOTSTRAP_COORDINATOR_EMAIL` and `BOOTSTRAP_COORDINATOR_PASSWORD` (12–256
 
 Passwords use salted scrypt (N=32768, r=8, p=1); opaque cookies and invitation tokens are stored only as SHA-256 hashes. Access-code verifiers are scrypt hashes. Coordinator cookies expire after 8 hours, patient cookies after 24 hours, unused invitations after 7 days, and voice capabilities after 1 hour or parent-session expiry/revocation. Cookies are HttpOnly, SameSite=Strict, Path=/, and Secure when `COOKIE_SECURE=true` or `NODE_ENV=production`. Auth/read responses use `Cache-Control: no-store`. Cookies persist across backend restarts. Secrets are never returned by account/list/read APIs.
 
-Use a same-origin `/api` reverse proxy (recommended), or same-site frontend/backend hosts with credentialed CORS. Strict cookies intentionally do not support a cross-site frontend/backend deployment. `CORS_ORIGIN` must list exact trusted frontend origins; cookie-authenticated mutations require an allowed `Origin` header, including requests made with curl. Browser login/redemption also reject untrusted origins. Login and invitation redemption have bounded in-process throttles; deploy this JSON-backed service as a single process. Account creation and disabling are available in the admin workspace. Distributed storage/rate limiting, MFA and password reset/recovery are broader deployment work.
+Use a same-origin `/api` reverse proxy (recommended), or same-site frontend/backend hosts with credentialed CORS. Strict cookies intentionally do not support a cross-site frontend/backend deployment. `CORS_ORIGIN` must list exact trusted frontend origins; cookie-authenticated mutations require an allowed `Origin` header, including requests made with curl. Browser login/redemption also reject untrusted origins. Login and invitation redemption have bounded in-process throttles; deploy this JSON-backed service as a single process. Staff account creation and disabling are available in the admin workspace. Patients self-register with a case-insensitive username (3–40 letters, numbers, dots, underscores or hyphens) and a 12–256 character password. Patient accounts are separate from staff accounts and never grant coordinator access. Distributed storage/rate limiting, MFA and password reset/recovery are broader deployment work.
 
 | Method | Path | Access / result |
 |---|---|---|
@@ -88,10 +136,23 @@ Use a same-origin `/api` reverse proxy (recommended), or same-site frontend/back
 | GET | `/sessions/:id` | Authorized coordinator or patient: saved guide, transcript, section text/status, attempts, results, timestamps and authenticated `accessRole` (`patient` or `coordinator`) |
 | POST | `/sessions/:id/invitations` | Authorized coordinator: create one-use invitation and separate code; replaces earlier unused invitations |
 | POST | `/sessions/:id/access` | `{invitationToken,accessCode}` → patient cookie for this review; atomic one-use redemption |
-| POST | `/sessions/:id/access/revoke` | Coordinator: revoke this review's patient/voice grants and all unused invitations |
+| POST | `/sessions/:id/access/revoke` | Coordinator: remove the patient assignment and revoke this review's patient/voice grants and all unused invitations |
 | POST | `/sessions/:id/logout` | Revoke this browser's patient grant and child voice grants; clear its cookie |
 
-The coordinator shares `/session/<id>#invite=<token>` and the access code separately. The frontend removes the fragment immediately and sends the token/code only in a POST body. This proves possession of two access credentials; it is not legal/clinical identity verification and collects no patient name or DOB. Coordinators can issue a fresh invitation after expiry or logout. A new invitation alone does not revoke existing patient sessions; use the explicit revoke endpoint for that.
+Patients create an account at `/patient` and give their username to the coordinator. Inviting that username adds the review to the patient's homepage as a new study. Assignments persist across logout, login expiry and server restarts. A review belongs to at most one patient; revoke access before reassigning it. Revoking one review does not affect the patient's other reviews or account.
+
+For a first-time invitation, the coordinator shares `/session/<id>#invite=<token>` and the access code separately. The frontend removes the fragment immediately, signs the patient into an account, and sends the token/code only in a POST body. Redemption permanently connects the review to that account. An already-open legacy review can also be connected using its existing valid cookie. This proves possession of the access credentials; it is not clinical identity verification and collects no patient name or DOB. A login expires after 24 hours, but the patient can sign back in with their password without another invitation. Password recovery is not yet implemented.
+
+| Method | Route | Patient account workflow |
+| --- | --- | --- |
+| POST | `/patient/register`, `/patient/login` | `{username,password}` → public patient profile and HttpOnly account cookie |
+| GET | `/patient/me` | Current patient profile; no password/hash |
+| POST | `/patient/logout` | Revoke this account login and child voice grants; retain study assignments |
+| GET | `/patient/studies` | Only this patient's assigned reviews, progress and new-study status |
+| POST | `/patient/studies/:id/open` | Mark an assigned review as opened |
+| POST | `/patient/studies/:id/accept` | Authenticated patient: redeem `{invitationToken,accessCode}` into a durable assignment |
+| POST | `/patient/studies/:id/claim` | Connect an existing valid legacy review cookie to the authenticated patient |
+| POST | `/sessions/:id/patient-invitation` | Scoped coordinator: assign an existing patient using `{username}` |
 
 Resume is read-only: `GET /sessions/:id` waits for prior in-process session operations and does not call the AI, re-grade, advance, or reset attempts. New sessions persist an immutable document snapshot, the current guide independently of question answers, and redacted patient/assistant transcript entries. Reports now include section IDs and a stable completion timestamp. Existing schema-version-1 data remains readable: accounts default to empty, legacy sessions use the original stored document, and missing historical transcripts/guides are not fabricated. The frontend shows available source text and explicitly marks incomplete history.
 
@@ -124,7 +185,7 @@ The participant acknowledgment stores the exact displayed text, timestamp, docum
 
 `GET /sessions/:id` includes a monotonic `revision`. The browser conversation polls visible reviews every 2.5 seconds, including during voice, and refreshes after a call ends. Only tool interactions form the durable voice transcript. Text drafts retain the revision at which typing began, so a remote advance produces a 409 instead of grading against the next section.
 
-For `POST /sessions`, supply `Idempotency-Key` (8–100 letters/digits/underscore/hyphen); creation is deduplicated per coordinator and key. For `/responses`, `/questions`, `/audio` and `/acknowledgment`, send `Idempotency-Key` plus `If-Match: <revision>`. A successful mutation and its replay receipt are persisted together. A repeated key/content returns the saved result without regrading or retranscribing, even after a restart. Reusing a key for different content or submitting a stale revision returns 409. Audio identity uses a byte hash and MIME type. The frontend keeps an uncertain submission's key until success or a conflict; a conflict requires a refresh and intentional new submission. Headerless legacy HTTP callers remain supported but do not receive replay/conflict protection. ElevenLabs tools require equivalent `requestId`/`expectedRevision` body fields.
+For `POST /sessions`, supply `Idempotency-Key` (8–100 letters/digits/underscore/hyphen); creation is deduplicated per coordinator and key. For `/messages`, `/responses`, `/questions`, `/audio` and `/acknowledgment`, send `Idempotency-Key` plus `If-Match: <revision>`. A successful mutation and its replay receipt are persisted together. A repeated key/content returns the saved result without regrading or retranscribing, even after a restart. Reusing a key for different content or submitting a stale revision returns 409. Audio identity uses a byte hash and MIME type. The frontend keeps an uncertain submission's key until success or a conflict; a conflict requires a refresh and intentional new submission. Headerless legacy HTTP callers remain supported but do not receive replay/conflict protection. ElevenLabs tools require equivalent `requestId`/`expectedRevision` body fields.
 
 Persistence and locks support one server process. Do not run multiple writers against the same JSON data directory. Receipts, transcripts, history and notifications are retained with the state file; production retention, pagination and distributed transactional storage are separate deployment work.
 
@@ -143,3 +204,13 @@ A worker runs every minute when enabled, queues a reminder for overdue unresolve
 The webhook receives bearer authentication and an `Idempotency-Key`, with JSON `{notificationId,event,studyId,sessionId,flagId,assigneeId,dueAt}`. It receives no transcript, participant name, question text, note or source document. The institution's relay maps account/study IDs to approved recipients and handles email/SMS. It must deduplicate the persistent ID: a crash or lost HTTP response can cause a repeated request. Redirects are rejected, requests time out after ten seconds, and errors shown to clients omit provider responses and secrets. `delivered` means the relay accepted the request with 2xx; it does not prove email/SMS delivery or clinician action. There is no direct vendor-specific email/SMS adapter bundled.
 
 Offline tests cover duplicate concurrency/restart, stale writes, audio replay, document approval/archive/snapshots, scope enforcement, follow-up persistence, settings, patient-only acknowledgment and fake relay retries/cancellation. Real provider delivery and microphone behavior require a configured smoke test.
+
+Dictation uses authenticated `POST /sessions/:id/transcription` with a multipart `file` (audio, maximum 10 MiB). It accepts browser WebM/Opus and MP4 recordings as well as the existing audio formats and returns `{ "text": "..." }`. Raw audio and draft transcripts are not persisted by this endpoint. Completed reviews reject dictation. Submit the reviewed draft explicitly through `/messages`.
+
+WebSocket voice requires `audio`, `interruption`, and `ping` in the ElevenLabs agent’s `conversation_config.conversation.client_events`. Provisioning includes these alongside transcript events. If upgrading an older agent, re-provision it from Voice setup or add these events in its Advanced settings; changing local code alone does not update an already provisioned remote agent. The browser SDK decodes and plays streamed audio directly; transcript polling is not the audio transport. See [ElevenLabs client events](https://elevenlabs.io/docs/eleven-agents/customization/events/client-events).
+
+The unified chat endpoint accepts `{ "message": "..." }` (1–5000 characters). Intent classification uses the active source section, current teach-back guide, and the last six transcript entries, with PII masking. Questions, mixed question/answer messages, and ambiguous messages never consume a teach-back attempt. Only clear attempts are graded. Emergency and human-handoff detection runs before classification. Classification and routing share one session lock, revision check and durable receipt; retries do not classify or grade again. Invalid provider output fails without advancing progress. The explicit `/questions` and `/responses` endpoints remain available for existing voice tools.
+
+### Spoken history
+
+`POST /sessions/:id/voice-transcript` accepts `{messages: [{id, role, content, timestamp}]}` for the authenticated review. Batches contain at most 100 messages; IDs deduplicate retries and content is redacted before storage. Snapshots expose `voiceTranscript` separately from processed `transcript`. Saving observed speech never grades, advances, or changes the review revision, and speech is not used as trusted AI context. The frontend merges both histories and avoids displaying matching processed turns twice. History remains visible after ending voice and reloading the page.

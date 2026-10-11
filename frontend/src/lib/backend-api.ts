@@ -48,6 +48,7 @@ const snapshotSchema = turnSchema.extend({
   disclosure: z.string(), attemptsForCurrentSection: z.number(), historyAvailable: z.boolean(),
   guide: z.object({ summary: z.string(), question: z.string() }).nullable(),
   transcript: z.array(z.object({ id: z.string(), role: z.enum(["ai", "patient"]), content: z.string(), timestamp: z.string(), sectionId: z.string().optional(), citations: z.array(z.string()).optional() })),
+  voiceTranscript: z.array(z.object({ id: z.string(), role: z.enum(["ai", "patient"]), content: z.string(), timestamp: z.string() })).default([]),
   sections: z.array(z.object({ id: z.string(), title: z.string(), text: z.string(), status: z.enum(["pending", "active", "completed", "needs-review"]) })),
 });
 export type BackendSnapshot = z.infer<typeof snapshotSchema>;
@@ -62,7 +63,17 @@ export const newMutation = (revision?: number): Mutation => ({ key: crypto.rando
 const mutationConfig = (mutation: Mutation) => ({ headers: { "Idempotency-Key": mutation.key, ...(mutation.revision === undefined ? {} : { "If-Match": String(mutation.revision) }) } });
 const sessionPath = (id: string) => `/sessions/${encodeURIComponent(id)}`;
 
+const patientSchema = z.object({ id: z.string(), username: z.string() });
+const patientStudySchema = z.object({ sessionId: z.string(), studyId: z.string(), title: z.string(), status, invitedAt: z.string(), isNew: z.boolean(), reviewedSections: z.number(), totalSections: z.number() });
+export type PatientUser = z.infer<typeof patientSchema>;
 export const backendApi = {
+  async patientMe() { return z.object({ user: patientSchema }).parse((await apiClient.get("/patient/me")).data).user; },
+  async patientSignIn(username: string, password: string, register = false) { return z.object({ user: patientSchema }).parse((await apiClient.post(`/patient/${register ? "register" : "login"}`, { username, password })).data).user; },
+  async patientSignOut() { await apiClient.post("/patient/logout"); },
+  async patientStudies() { return z.object({ studies: z.array(patientStudySchema) }).parse((await apiClient.get("/patient/studies")).data).studies; },
+  async claimPatientReview(id: string) { await apiClient.post(`/patient/studies/${encodeURIComponent(id)}/claim`); },
+  async openPatientStudy(id: string) { await apiClient.post(`/patient/studies/${encodeURIComponent(id)}/open`); },
+  async invitePatient(id: string, username: string) { await apiClient.post(`${sessionPath(id)}/patient-invitation`, { username }); },
   async login(email: string, password: string) { return z.object({ user: userSchema }).parse((await apiClient.post("/auth/login", { email, password })).data).user; },
   async me() { return z.object({ user: userSchema }).parse((await apiClient.get("/auth/me")).data).user; },
   async accounts() { return z.object({ accounts: z.array(userSchema) }).parse((await apiClient.get("/auth/accounts")).data).accounts; },
@@ -76,7 +87,7 @@ export const backendApi = {
   async invite(id: string) {
     return z.object({ sessionId: z.string(), invitationToken: z.string(), accessCode: z.string(), expiresAt: z.string() }).parse((await apiClient.post(`${sessionPath(id)}/invitations`)).data);
   },
-  async exchange(id: string, invitationToken: string, accessCode: string) { await apiClient.post(`${sessionPath(id)}/access`, { invitationToken, accessCode }); },
+  async exchange(id: string, invitationToken: string, accessCode: string) { await apiClient.post(`/patient/studies/${encodeURIComponent(id)}/accept`, { invitationToken, accessCode }); },
   async revoke(id: string) { await apiClient.post(`${sessionPath(id)}/access/revoke`); },
   async patientLogout(id: string) { await apiClient.post(`${sessionPath(id)}/logout`); },
   async health() {
@@ -92,6 +103,12 @@ export const backendApi = {
   async start(documentId: string, mutation = newMutation()) {
     return turnSchema.parse((await apiClient.post("/sessions", { documentId: documentId.trim() }, mutationConfig(mutation))).data);
   },
+  async message(id: string, message: string, mutation = newMutation()) {
+    return turnSchema.parse((await apiClient.post(`${sessionPath(id)}/messages`, { message }, mutationConfig(mutation))).data);
+  },
+  async saveVoiceTranscript(id: string, messages: BackendSnapshot["voiceTranscript"]) {
+    await apiClient.post(`${sessionPath(id)}/voice-transcript`, { messages });
+  },
   async respond(id: string, response: string, mutation = newMutation()) {
     return turnSchema.parse((await apiClient.post(`${sessionPath(id)}/responses`, { response }, mutationConfig(mutation))).data);
   },
@@ -102,6 +119,11 @@ export const backendApi = {
     const form = new FormData();
     form.append("file", file);
     return turnSchema.parse((await apiClient.post(`${sessionPath(id)}/audio`, form, mutationConfig(mutation))).data);
+  },
+  async transcribe(id: string, audio: Blob, signal: AbortSignal) {
+    const form = new FormData();
+    form.append("file", audio, "dictation");
+    return z.object({ text: z.string().min(1) }).parse((await apiClient.post(`${sessionPath(id)}/transcription`, form, { signal })).data).text;
   },
   async speech(id: string): Promise<Blob> {
     try {

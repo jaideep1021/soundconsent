@@ -1,0 +1,10 @@
+# Only source and locked build inputs belong in the build context.
+**
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.build.json
+!src/
+!src/**
+!Dockerfile
+!.dockerignore

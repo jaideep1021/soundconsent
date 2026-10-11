@@ -46,6 +46,7 @@ export interface ReviewSession {
   guide?: SectionGuide | null;
   completedAt?: string;
   transcript?: TranscriptEntry[];
+  voiceTranscript?: TranscriptEntry[];
   historyIncomplete?: boolean;
   revision?: number;
   creationKey?: string;
@@ -82,12 +83,20 @@ export interface GroundedAnswer {
 }
 
 export interface AiProvider {
+  classifyMessage(message: string, context: MessageContext): Promise<MessageIntent>;
   embed(text: string): Promise<number[]>;
   transcribeAudio(audio: Buffer, mimeType: string): Promise<string>;
   createGuide(section: ConsentSection, rephrase?: boolean): Promise<SectionGuide>;
   grade(section: ConsentSection, response: string): Promise<boolean>;
   answerQuestion(question: string, sections: ConsentSection[]): Promise<GroundedAnswer>;
   verifyAnswer(question: string, answer: GroundedAnswer, sections: ConsentSection[]): Promise<boolean>;
+}
+
+export type MessageIntent = "question" | "response" | "clarify";
+export interface MessageContext {
+  section: ConsentSection;
+  guide: SectionGuide | null;
+  recentMessages: Array<Pick<TranscriptEntry, "role" | "content">>;
 }
 
 export interface TranscriptEntry {
@@ -109,10 +118,11 @@ export interface Account {
 }
 export interface AuthGrant {
   hash: string;
-  kind: "coordinator" | "patient" | "voice";
+  kind: "coordinator" | "patient" | "voice" | "patient_account";
   accountId?: string;
   sessionId?: string;
   parentHash?: string;
+  patientId?: string;
   expiresAt: number;
 }
 export interface Invitation {
@@ -122,7 +132,11 @@ export interface Invitation {
   accountId?: string;
   expiresAt: number;
 }
+export interface PatientAccount { id: string; username: string; passwordHash: string }
+export interface PatientMembership { patientId: string; sessionId: string; invitedAt: string; openedAt?: string }
 export interface AuthState {
+  patients?: PatientAccount[];
+  memberships?: PatientMembership[];
   accounts: Account[];
   grants: AuthGrant[];
   invitations: Invitation[];

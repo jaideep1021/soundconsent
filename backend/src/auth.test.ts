@@ -11,6 +11,11 @@ import type { AiProvider } from "./types.js";
 
 const origin = "http://localhost:5173";
 const ai: AiProvider = {
+  async classifyMessage(message) {
+    if (message.includes("?") || message.startsWith("Please explain")) return "question";
+    if (message === "okay") return "clarify";
+    return "response";
+  },
   async embed() { return [1, 0]; }, async transcribeAudio() { return "understood"; },
   async createGuide(section, rephrase) { return { summary: `${rephrase ? "Rephrased " : ""}${section.text}`, question: `Explain ${section.title}` }; },
   async grade(_section, response) { return response.startsWith("understood"); },
@@ -91,7 +96,7 @@ test("single-use patient access, read/voice boundaries, revocation, expiry and l
     const id: string = started.json().sessionId;
     const second = await f.request("POST", "/sessions", admin, { documentId: f.doc.id });
     const otherId: string = second.json().sessionId;
-    for (const [method, path] of [["GET", ""], ["POST", "/responses"], ["POST", "/questions"], ["POST", "/audio"], ["POST", "/speech"], ["GET", "/conversation-url"]] as const) {
+    for (const [method, path] of [["GET", ""], ["POST", "/responses"], ["POST", "/questions"], ["POST", "/audio"], ["POST", "/speech"], ["POST", "/voice-transcript"], ["GET", "/conversation-url"]] as const) {
       assert.equal((await f.app.inject({ method, url: `/sessions/${id}${path}` })).statusCode, 401, path);
     }
     const invite = (await f.request("POST", `/sessions/${id}/invitations`, admin)).json();
@@ -103,6 +108,15 @@ test("single-use patient access, read/voice boundaries, revocation, expiry and l
     const patientSnapshot = await f.request("GET", `/sessions/${id}`, patient);
     assert.equal(patientSnapshot.statusCode, 200);
     assert.equal(patientSnapshot.json().accessRole, "patient");
+    const speech = { id: "spoken-message-1", role: "patient", content: "Email me at test@example.com", timestamp: new Date().toISOString() };
+    for (let retry = 0; retry < 2; retry++) assert.equal((await f.request("POST", `/sessions/${id}/voice-transcript`, patient, { messages: [speech] })).statusCode, 200);
+    assert.equal((await f.request("POST", `/sessions/${otherId}/voice-transcript`, patient, { messages: [speech] })).statusCode, 401);
+    assert.equal((await f.request("POST", `/sessions/${id}/voice-transcript`, patient, { messages: [{ ...speech, role: "system" }] })).statusCode, 400);
+    const withSpeech = (await f.request("GET", `/sessions/${id}`, patient)).json();
+    assert.equal(withSpeech.voiceTranscript.length, 1);
+    assert.ok(!withSpeech.voiceTranscript[0].content.includes("test@example.com"));
+    assert.equal(withSpeech.revision, patientSnapshot.json().revision);
+    assert.deepEqual(withSpeech.transcript, patientSnapshot.json().transcript);
     assert.equal((await f.request("GET", `/sessions/${id}`, admin)).json().accessRole, "coordinator");
     for (const path of ["/documents", "/sessions", `/sessions/${otherId}`, `/sessions/${id}/report`, "/auth/me"]) assert.equal((await f.request("GET", path, patient)).statusCode, 401, path);
     const voice = await f.request("GET", `/sessions/${id}/conversation-url`, patient);
@@ -188,5 +202,87 @@ test("legacy reviews expose available source without inventing prior history", a
     assert.equal((await f.request("GET", `/sessions/${id}`, admin)).json().historyAvailable, false);
     const malformed = await f.app.inject({ method: "POST", url: "/auth/login", headers: { "content-type": "application/json" }, payload: "{broken" });
     assert.equal(malformed.statusCode, 400); assert.equal(malformed.json().error, "Invalid request");
+  } finally { await f.cleanup(); }
+});
+
+test("patient accounts keep study access through logout, expiry and restart while isolating patients and staff", async () => {
+  const f = await fixture();
+  try {
+    const admin = await f.login();
+    const id = (await f.request("POST", "/sessions", admin, { documentId: f.doc.id })).json().sessionId;
+    const otherId = (await f.request("POST", "/sessions", admin, { documentId: f.otherDoc.id })).json().sessionId;
+    const register = await f.request("POST", "/patient/register", "", { username: " Patient.One ", password: "patient-long-password", role: "admin" });
+    assert.equal(register.statusCode, 201, register.body);
+    assert.deepEqual(Object.keys(register.json().user).sort(), ["id", "username"]);
+    assert.equal(register.json().user.username, "patient.one");
+    let patient = cookieFrom(register.headers);
+    assert.match(String(register.headers["set-cookie"]), /HttpOnly; SameSite=Strict; Max-Age=86400; Secure/);
+    assert.equal((await f.request("POST", "/patient/register", "", { username: "PATIENT.ONE", password: "patient-long-password" })).statusCode, 409);
+    assert.equal((await f.request("POST", "/patient/register", "", { username: "short", password: "short" })).statusCode, 400);
+    assert.equal((await f.request("GET", "/patient/studies", patient)).json().studies.length, 0);
+    assert.equal((await f.request("POST", `/sessions/${id}/patient-invitation`, patient, { username: "patient.one" })).statusCode, 401);
+    assert.equal((await f.request("POST", `/sessions/${id}/patient-invitation`, admin, { username: "PATIENT.ONE" })).statusCode, 201);
+    assert.equal((await f.request("POST", `/sessions/${id}/patient-invitation`, admin, { username: "patient.one" })).statusCode, 201);
+    assert.equal((await f.request("POST", `/sessions/${id}/invitations`, admin)).statusCode, 409);
+    let studies = (await f.request("GET", "/patient/studies", patient)).json().studies;
+    assert.equal(studies.length, 1); assert.equal(studies[0].isNew, true); assert.equal(studies[0].studyId, "study-a");
+    for (const path of ["/documents", "/sessions", "/auth/me", "/auth/accounts", `/sessions/${id}/report`, `/sessions/${otherId}`]) assert.equal((await f.request("GET", path, patient)).statusCode, 401, path);
+    assert.equal((await f.app.inject({ method: "POST", url: `/patient/studies/${id}/open`, headers: { cookie: patient } })).statusCode, 403);
+    assert.equal((await f.request("POST", `/patient/studies/${otherId}/open`, patient)).statusCode, 403);
+    assert.equal((await f.request("POST", `/patient/studies/${id}/open`, patient)).statusCode, 200);
+    assert.equal((await f.request("POST", `/sessions/${id}/responses`, patient, { response: "understood monthly visits" })).statusCode, 200);
+    assert.equal((await f.request("GET", `/sessions/${id}`, patient)).json().accessRole, "patient");
+    const persisted = await readFile(f.config.stateFile, "utf8");
+    assert.ok(!persisted.includes("patient-long-password")); assert.ok(!persisted.includes(patient.split("=")[1]!));
+    const second = await f.request("POST", "/patient/register", "", { username: "patient.two", password: "patient-long-password" });
+    const another = cookieFrom(second.headers);
+    assert.equal((await f.request("POST", `/sessions/${id}/patient-invitation`, admin, { username: "patient.two" })).statusCode, 409);
+    assert.equal((await f.request("GET", `/sessions/${id}`, another)).statusCode, 401);
+    assert.equal((await f.request("GET", "/patient/studies", another)).json().studies.length, 0);
+    await f.store.updateAuth((auth) => { for (const grant of auth.grants) if (grant.kind === "patient_account") grant.expiresAt = 0; });
+    assert.equal((await f.request("GET", `/sessions/${id}`, patient)).statusCode, 401);
+    assert.equal((await f.request("POST", "/patient/login", "", { username: "patient.one", password: "wrong" })).statusCode, 401);
+    const login = await f.request("POST", "/patient/login", "", { username: "PATIENT.ONE", password: "patient-long-password" });
+    assert.equal(login.statusCode, 200); patient = cookieFrom(login.headers);
+    await f.restart();
+    studies = (await f.request("GET", "/patient/studies", patient)).json().studies;
+    assert.equal(studies.length, 1); assert.equal(studies[0].isNew, false); assert.equal(studies[0].reviewedSections, 1);
+    assert.equal((await f.request("GET", `/sessions/${id}`, patient)).statusCode, 200);
+    assert.equal((await f.request("POST", "/patient/logout", patient)).statusCode, 200);
+    assert.equal((await f.request("GET", `/sessions/${id}`, patient)).statusCode, 401);
+    patient = cookieFrom((await f.request("POST", "/patient/login", "", { username: "patient.one", password: "patient-long-password" })).headers);
+    assert.equal((await f.request("GET", `/sessions/${id}`, patient)).statusCode, 200);
+    await f.request("POST", `/sessions/${id}/access/revoke`, admin);
+    assert.equal((await f.request("GET", `/sessions/${id}`, patient)).statusCode, 401);
+    assert.equal((await f.request("GET", "/patient/studies", patient)).json().studies.length, 0);
+  } finally { await f.cleanup(); }
+});
+
+test("first-time invitations and existing temporary access connect to one patient account", async () => {
+  const f = await fixture();
+  try {
+    const admin = await f.login();
+    const id = (await f.request("POST", "/sessions", admin, { documentId: f.doc.id })).json().sessionId;
+    const anotherId = (await f.request("POST", "/sessions", admin, { documentId: f.doc.id })).json().sessionId;
+    const patient = cookieFrom((await f.request("POST", "/patient/register", "", { username: "invited.patient", password: "patient-long-password" })).headers);
+    const stranger = cookieFrom((await f.request("POST", "/patient/register", "", { username: "other.patient", password: "patient-long-password" })).headers);
+    assert.equal((await f.request("POST", `/patient/studies/${id}/claim`, `${patient}; ${admin}`)).statusCode, 403);
+    const invite = (await f.request("POST", `/sessions/${id}/invitations`, admin)).json();
+    assert.equal((await f.request("POST", `/patient/studies/${id}/accept`, "", invite)).statusCode, 401);
+    const attempts = await Promise.all([patient, stranger].map((cookie) => f.request("POST", `/patient/studies/${id}/accept`, cookie, invite)));
+    assert.deepEqual(attempts.map((r) => r.statusCode).sort(), [200, 401]);
+    const winner = attempts[0]!.statusCode === 200 ? patient : stranger;
+    assert.equal((await f.request("GET", "/patient/studies", winner)).json().studies[0].sessionId, id);
+    assert.equal((await f.request("GET", `/sessions/${id}`, winner)).statusCode, 200);
+    const voice = (await f.request("GET", `/sessions/${id}/conversation-url`, winner)).json().dynamicVariables.session_access;
+    await f.request("POST", `/sessions/${id}/access/revoke`, admin);
+    const revoked = await f.app.inject({ method: "POST", url: "/elevenlabs/tools/questions", headers: { authorization: `Bearer ${f.config.elevenLabsToolApiKey}` }, payload: { sessionId: id, sessionAccess: voice, requestId: "revoked-voice", expectedRevision: "0", question: "When?" } });
+    assert.equal(revoked.statusCode, 401);
+    const legacyInvite = (await f.request("POST", `/sessions/${anotherId}/invitations`, admin)).json();
+    const temporary = cookieFrom((await f.request("POST", `/sessions/${anotherId}/access`, "", legacyInvite)).headers);
+    assert.equal((await f.request("POST", `/patient/studies/${anotherId}/claim`, `${patient}; ${temporary}`)).statusCode, 200);
+    assert.equal((await f.request("GET", `/sessions/${anotherId}`, temporary)).statusCode, 401);
+    assert.equal((await f.request("GET", `/sessions/${anotherId}`, patient)).statusCode, 200);
+    assert.equal((await f.request("POST", `/patient/studies/${anotherId}/claim`, `${stranger}; ${temporary}`)).statusCode, 403);
   } finally { await f.cleanup(); }
 });
