@@ -1,7 +1,0 @@
-{
-  "functions": {
-    "src/app.ts": {
-      "includeFiles": "data/approved-versions.json"
-    }
-  }
-}

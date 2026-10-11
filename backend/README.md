@@ -15,6 +15,46 @@ npm run dev
 
 `npm run build` compiles to `dist/`, `npm start` runs the compiled server, and `npm test` runs offline tests. Gemini credentials are required to ingest documents and run RAG, teach-back grading, grounding checks, and recorded-audio transcription. ElevenLabs credentials are used for speech and its Conversational AI agent.
 
+## Vercel deployment
+
+Use the Fastify framework preset, Root Directory `backend`, Node.js 24.x,
+and the default output directory. Do not add a `functions: { "src/app.ts": ... }`
+configuration: this project uses automatic Fastify entry-point detection, not an
+`api/` function. The existing `src/app.ts` request handler lazily initializes the
+shared app; `src/server.ts` remains the local/Docker listener.
+
+Remove `APPROVED_VERSIONS_FILE` from the Vercel environment to use the checked-in
+`data/approved-versions.json`. With `VERCEL=1`, a literal module-relative file read
+makes the asset traceable independently of the working directory and `DATA_DIR`.
+The existing study/version entries are unchanged. Changes require redeployment.
+An explicitly configured approval file takes precedence and must exist in the
+runtime; missing files, malformed JSON, and invalid shapes stop startup rather
+than falling back to another allow-list. Outside Vercel, the existing
+`APPROVED_VERSIONS_FILE` or `DATA_DIR/approved-versions.json` behavior is unchanged.
+Docker retains its empty default allow-list and read-only configuration mount.
+
+Set `CORS_ORIGIN` to the exact frontend origin and `PUBLIC_BASE_URL` to the public
+backend URL; configure provider and bootstrap credentials as described below.
+The Vercel dashboard settings have to be verified separately from local `.env`.
+
+**Storage remains a runtime blocker for durable Vercel use.** The current backend
+writes accounts, tokens, documents, sessions, and notification state to `state.json`
+and audit events to `audit.jsonl`. The function bundle is read-only. Explicitly
+setting `DATA_DIR=/tmp/soundconsent` can support a disposable, synthetic-data smoke
+test only: files can disappear and are not shared across instances. This is not a
+persistent deployment solution. No automatic `/tmp` fallback is implemented.
+Migrate state and audit events to shared durable storage (with transactional
+concurrency controls) or use the single-instance Docker deployment with its
+persistent volume before storing real records. The in-process notification timer
+also needs a durable scheduled worker on serverless hosting. `/health` alone does
+not prove persistence, authentication, upload limits, or provider workflows.
+
+After committing the changes, redeploy the new commit (redeploying an older commit
+will not include this fix). Verify `/health` and a synthetic end-to-end flow.
+
+References: [Fastify on Vercel](https://vercel.com/docs/frameworks/backend/fastify)
+and [files in Vercel Functions](https://vercel.com/kb/guide/how-can-i-use-files-in-serverless-functions).
+
 ## Deploy with Docker
 
 Run these commands from `backend/` (or build from the repository root with `docker build -t soundconsent-backend ./backend`). The multi-stage image contains compiled application code and locked production dependencies, runs as UID/GID `1000:1000`, and excludes `.env`, saved state, audit logs, tests, and local dependencies from the final image.

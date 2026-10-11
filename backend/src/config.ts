@@ -37,10 +37,16 @@ export async function loadConfig(): Promise<Config> {
   }
   const trustProxy = (process.env.TRUST_PROXY ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
   const dataDir = resolve(process.env.DATA_DIR ?? "./data");
-  const approvedFile = resolve(process.env.APPROVED_VERSIONS_FILE ?? `${dataDir}/approved-versions.json`);
+  const approvedFile = process.env.APPROVED_VERSIONS_FILE;
+  const useBundledApprovals = process.env.VERCEL === "1" && approvedFile === undefined;
   let value: unknown;
   try {
-    value = JSON.parse(await readFile(approvedFile, "utf8"));
+    // A literal module-relative URL lets Vercel trace this read-only asset.
+    // Explicit overrides always win and fail closed; never fall back on read errors.
+    const contents = useBundledApprovals
+      ? await readFile(new URL("../data/approved-versions.json", import.meta.url), "utf8")
+      : await readFile(resolve(approvedFile ?? `${dataDir}/approved-versions.json`), "utf8");
+    value = JSON.parse(contents);
   } catch (error) {
     throw new HttpError(500, `Could not load approved versions file: ${error instanceof Error ? error.message : "invalid file"}`);
   }
