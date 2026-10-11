@@ -65,11 +65,7 @@ export async function loadConfig(): Promise<Config> {
   if (Boolean(process.env.BOOTSTRAP_COORDINATOR_EMAIL?.trim()) !== Boolean(process.env.BOOTSTRAP_COORDINATOR_PASSWORD)) {
     throw new HttpError(500, "Configure both bootstrap coordinator email and password, or neither");
   }
-  const corsOrigins = (process.env.CORS_ORIGIN ?? "http://localhost:5173").split(",").map((origin) => origin.trim()).filter(Boolean);
-  if (!corsOrigins.length || corsOrigins.some((origin) => {
-    try { const url = new URL(origin); return !["http:", "https:"].includes(url.protocol) || url.origin !== origin; }
-    catch { return true; }
-  })) throw new HttpError(500, "CORS_ORIGIN must contain exact HTTP(S) origins without paths or wildcards");
+  const corsOrigins = parseCorsOrigins(process.env.CORS_ORIGIN ?? "http://localhost:5173");
   const notificationWebhookUrl = process.env.NOTIFICATION_WEBHOOK_URL?.trim() ?? "";
   const notificationWebhookSecret = process.env.NOTIFICATION_WEBHOOK_SECRET ?? "";
   const notificationDeliveryEnabled = process.env.NOTIFICATION_DELIVERY_ENABLED === "true";
@@ -109,4 +105,23 @@ export async function loadConfig(): Promise<Config> {
 export function requireGemini(config: Config): { apiKey: string; model: string } {
   if (!config.geminiApiKey) throw new HttpError(503, "GEMINI_API_KEY is not configured");
   return { apiKey: config.geminiApiKey, model: config.geminiModel };
+}
+
+// Normalize equivalent origin spellings without allowing paths or broadening hosts.
+export function parseCorsOrigins(value: string): string[] {
+  const message = "CORS_ORIGIN must be a comma-separated list of frontend HTTP(S) origins, " +
+    "for example https://frontend.example.com (no quotes, paths, credentials, queries, fragments or wildcards)";
+  const origins = value.split(",").map((entry) => {
+    const origin = entry.trim();
+    try {
+      if (!/^https?:\/\/[^/?#\\\s]+\/?$/i.test(origin) || origin.includes("*")) throw new Error();
+      const url = new URL(origin);
+      if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error();
+      return url.origin;
+    } catch {
+      // Do not echo the value: it could accidentally contain credentials.
+      throw new HttpError(500, message);
+    }
+  });
+  return [...new Set(origins)];
 }

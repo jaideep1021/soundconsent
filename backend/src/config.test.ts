@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { loadConfig } from "./config.js";
+import { loadConfig, parseCorsOrigins } from "./config.js";
 
 test("approval configuration stays fail-closed across Vercel and Docker paths", async (t) => {
   const originalEnv = { ...process.env };
@@ -52,4 +52,22 @@ test("approval configuration stays fail-closed across Vercel and Docker paths", 
     Object.assign(process.env, originalEnv);
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("CORS normalizes root slashes, casing and default ports to exact origins", () => {
+  assert.deepEqual(parseCorsOrigins(" https://FRONTEND.example.com:443/, http://localhost:5173/, https://frontend.example.com "),
+    ["https://frontend.example.com", "http://localhost:5173"]);
+  assert.deepEqual(parseCorsOrigins("https://frontend.example.com:8443"), ["https://frontend.example.com:8443"]);
+});
+
+test("CORS rejects unsafe and ambiguous configuration without exposing its value", () => {
+  for (const value of ["", " ", "*", "https://*.example.com", "null", "example.com", "ftp://example.com",
+    '"https://example.com"', "https://example.com/dashboard", "https://example.com//", "https://example.com/..",
+    "https://example.com?x=1", "https://example.com#x", "https://user:secret@example.com",
+    "https://example.com,", "https://example.com,,http://localhost:5173", "https://example.com\\evil",
+    "https://example.com https://other.example.com"]) {
+    assert.throws(() => parseCorsOrigins(value), /CORS_ORIGIN must be a comma-separated list/);
+  }
+  assert.throws(() => parseCorsOrigins("https://user:secret@example.com"), (error: unknown) =>
+    error instanceof Error && !error.message.includes("secret"));
 });

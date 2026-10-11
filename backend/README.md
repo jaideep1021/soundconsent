@@ -33,7 +33,8 @@ than falling back to another allow-list. Outside Vercel, the existing
 `APPROVED_VERSIONS_FILE` or `DATA_DIR/approved-versions.json` behavior is unchanged.
 Docker retains its empty default allow-list and read-only configuration mount.
 
-Set `CORS_ORIGIN` to the exact frontend origin and `PUBLIC_BASE_URL` to the public
+Set `CORS_ORIGIN` to the exact frontend origin (for example `https://frontend.example.com`,
+without surrounding quotes or a page path) and `PUBLIC_BASE_URL` to the public
 backend URL; configure provider and bootstrap credentials as described below.
 The Vercel dashboard settings have to be verified separately from local `.env`.
 
@@ -254,3 +255,15 @@ The unified chat endpoint accepts `{ "message": "..." }` (1–5000 characters). 
 ### Spoken history
 
 `POST /sessions/:id/voice-transcript` accepts `{messages: [{id, role, content, timestamp}]}` for the authenticated review. Batches contain at most 100 messages; IDs deduplicate retries and content is redacted before storage. Snapshots expose `voiceTranscript` separately from processed `transcript`. Saving observed speech never grades, advances, or changes the review revision, and speech is not used as trusted AI context. The frontend merges both histories and avoids displaying matching processed turns twice. History remains visible after ending voice and reloading the page.
+
+### Troubleshooting startup: CORS_ORIGIN
+
+If runtime logs report `CORS_ORIGIN`, the function reached configuration validation;
+this is not the earlier missing approval-file error. In the backend project's Vercel
+Environment Variables, replace `CORS_ORIGIN` with the actual frontend origin, such as
+`https://frontend.example.com`. Do not paste `CORS_ORIGIN=`, quotation marks, a dashboard
+path, or `*` into the value field. Multiple explicitly trusted origins use commas.
+A single root slash is accepted and normalized; paths and credentials remain rejected.
+If saved as a Secret, Vercel cannot reveal the old value; replace it with the verified
+frontend origin. Redeploy after saving environment changes; existing deployments retain
+their previous environment. Keep the same-site cookie and durable-storage requirements above.
