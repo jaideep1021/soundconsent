@@ -37,7 +37,82 @@ SoundConsent makes comprehension gaps visible before the final discussion, gives
 | Coordinator workload | Measure total staff minutes, including setup, report review, discussion, and follow-up. |
 | Completion and safety | Track started/completed reviews, drop-off, unsupported answers, and escalation handling; examine differences by literacy, language, and modality. |
 
-The repository does not establish a percentage improvement in comprehension, hours saved, recruitment gains, or a zero-hallucination rate.
+The repository does not establish a measured percentage improvement in comprehension, hours saved, recruitment gains, or a zero-hallucination rate. The following model estimates what time savings could be worth if achieved.
+
+### Projected clinician time and economic impact
+
+**At 10 consent reviews per week, reducing a 45-minute workflow by 20–30% would return 78–117 clinician hours per year, worth approximately $4,950–$7,425 in wage-valued capacity.** The midpoint, 25%, returns **97.5 hours and approximately $6,187 per year**. A 50% reduction would return **195 hours and approximately $12,375**.
+
+These are conditional planning scenarios, not observed SoundConsent results. The calculations use the following inputs:
+
+| Input | Value | Basis |
+| --- | --- | --- |
+| Existing clinician time per consent review | **45 minutes** | Project planning assumption supplied by the project owner; not a verified U.S. average. Includes explanation and teach-back. |
+| Time reduction | **20%, 30%, or 50%** | Requested lower and optimistic scenarios. **25%** is the arithmetic midpoint of the 20–30% range, not an empirically estimated average. |
+| Reviews per clinician per week | **10** | Illustrative workload, not a national caseload estimate. Sensitivity to 5 and 20 reviews is shown below. |
+| Operating weeks | **52** | Annualization assumption. Use actual weeks of consent activity for a particular clinician or service. |
+| U.S. hourly wage | **$63.46** | BLS May 2025 **mean hourly wage for healthcare diagnosing or treating practitioners**, used as a broad clinician proxy. This occupational group is broader than consent staff. [BLS, Table 1](https://www.bls.gov/news.release/ocwage.t01.htm), [dated May 2025 release](https://www.bls.gov/news.release/archives/ocwage_05152026.pdf). |
+
+The wage is a mean, not a median, billing rate, or fully loaded employer cost. For role-specific sensitivity, the same BLS release reports **$48.76/hour for registered nurses** and **$133.30/hour for physicians**. Actual research-coordinator pay and the mix of staff time should replace the proxy in a site-specific business case. [BLS occupational wage estimates](https://www.bls.gov/news.release/ocwage.t01.htm).
+
+#### Calculation per clinician
+
+```text
+Hours returned per week = reviews per week × (45 / 60) × time-reduction fraction
+Hours returned per year = hours returned per week × 52
+Annual wage value       = hourly wage × hours returned per week × 52
+
+25% midpoint example:
+10 × (45 / 60) × 0.25 = 1.875 hours/week
+$63.46 × 1.875 × 52   = $6,187.35/year
+```
+
+| Scenario | Minutes returned per patient | Clinician minutes remaining | Hours returned/week | Hours returned/year | Annual wage value |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 20% reduction | 9 | 36 | 1.50 | 78 | $4,950 |
+| **25% midpoint** | **11.25** | **33.75** | **1.875** | **97.5** | **$6,187** |
+| 30% reduction | 13.5 | 31.5 | 2.25 | 117 | $7,425 |
+| 50% reduction | 22.5 | 22.5 | 3.75 | 195 | $12,375 |
+
+Dollar totals are rounded to the nearest dollar after calculation. At the 25% midpoint, the returned time is equivalent to about **12 eight-hour workdays per year**. If all of it could be scheduled into additional 33.75-minute consent workflows, the same consent-time budget could support about **3.3 more reviews per week**; this is theoretical capacity, not a prediction of enrollment or demand.
+
+Volume matters: at **5 reviews/week**, the midpoint returns **48.75 hours and $3,094/year**; at **20 reviews/week**, it returns **195 hours and $12,375/year**. For a service operating 48 rather than 52 weeks, multiply annual totals by `48 / 52`.
+
+| Whose time is returned? | Mean hourly wage | Annual value of 97.5 returned hours |
+| --- | ---: | ---: |
+| Registered nurse | $48.76 | $4,754 |
+| Broad practitioner proxy used above | $63.46 | $6,187 |
+| Physician | $133.30 | $12,997 |
+
+Use the wage of the person whose work is actually reduced. Do not value the same saved minute once as nursing time and again as physician time.
+
+#### Patient volume and industry scale
+
+Two public benchmarks show the size of the surrounding research activity while measuring different populations:
+
+- **Interventional cancer research:** NCI's cancer-center benchmark table reports **104,869 interventional patient accruals in fiscal year 2016** across NCI-designated cancer centers. This is a historical enrollment-volume benchmark, not today's national total or necessarily 104,869 unique people. The selected fiscal year is 2016 even though the webpage carries a later update date. [NCI, Data Table 4, Research Category → 2016 → INT](https://cancercenters.cancer.gov/cancer-centers/benchmark-data/clinical-research-studies-dt4).
+- **Broader U.S. research participation:** NIH's FY2025 summary reports **8,202,424 participants at U.S. sites** in NIH-funded clinical research. This includes research beyond interventional trials, and NIH inclusion reporting uses cumulative accrual; it cannot be treated as 8.2 million new annual 45-minute consent appointments. It also is not a census of privately funded research. [NIH FY2025 enrollment summary](https://www.grants.nih.gov/news-events/nih-extramural-nexus-news/2026/05/fy25-enrollment-data-from-nih-supported-clinical-research-now-available), [NIH cumulative reporting policy](https://grants.nih.gov/grants/guide/notice-files/NOT-OD-25-131.html).
+
+For an addressable-volume model, count **eligible consent episodes actually using SoundConsent each year**, with one modeled review per episode. The table below uses illustrative annual U.S. volumes, not a claimed market census or adoption forecast. The 100,000-episode case is comparable in order of magnitude to the historical NCI interventional benchmark; the million-episode case is an expansion scenario that still needs validation.
+
+```text
+Annual hours returned = eligible episodes/year × (45 / 60) × reduction fraction
+Annual wage value     = annual hours returned × $63.46
+```
+
+| Annual consent episodes using the solution | 20% reduction: hours / wage value | 30% reduction: hours / wage value | 50% reduction: hours / wage value |
+| --- | ---: | ---: | ---: |
+| 10,000 | 1,500 h / $95,190 | 2,250 h / $142,785 | 3,750 h / $237,975 |
+| 100,000 | 15,000 h / $951,900 | 22,500 h / $1,427,850 | 37,500 h / $2,379,750 |
+| 1,000,000 | 150,000 h / $9,519,000 | 225,000 h / $14,278,500 | 375,000 h / $23,797,500 |
+
+At the **25% midpoint**, every **100,000 annual consent episodes** would return **18,750 clinician hours**, with a wage value of approximately **$1.19 million per year**. Applying that same assumption to a hypothetical cohort the size of the NCI benchmark, 104,869 episodes, gives about **19,663 hours and $1.25 million**. This is a modeled value at May 2025 U.S. wages, not savings achieved by those centers. Do not multiply these annual episode totals by 52 again or add the overlapping NCI and NIH populations together.
+
+#### What must hold for the projection to be realized
+
+The modeled reduction must be **net of added clinician work**: report review, troubleshooting, setup allocated across reviews, and extra follow-up. If 25% describes only a shorter discussion and the app adds five staff minutes per patient, the net saving falls from 11.25 to **6.25 minutes**, or about **54.2 hours and $3,437/year** at 10 reviews/week. Software, AI, implementation, and ongoing operating costs would further reduce the economic benefit.
+
+The dollar figures value capacity that staff can redirect; they are not automatically payroll savings, revenue, or software market size. Patient time may also shift into self-guided preparation rather than shrink. A pilot should measure total staff time and patient time separately, verify that comprehension and human follow-up are maintained, and replace the assumed reduction and throughput with observed values. Sources and calculations checked October 11, 2026.
 
 ## How it works
 
