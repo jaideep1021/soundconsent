@@ -145,7 +145,11 @@ export class SessionService {
     }
     const section = document.sections[session.sectionIndex];
     if (!section) throw new HttpError(500, "Current section is missing");
-    const passed = await this.ai.grade(section, response);
+    // Use the persisted question actually shown, including a rephrased question.
+    // Legacy sessions without a guide cannot demonstrate a pass against an unknown
+    // question; use the existing re-explanation/follow-up path instead.
+    const question = session.guide?.question;
+    const passed = question?.trim() ? await this.ai.grade(section, response, question) : false;
     const attempts = session.attemptsForCurrentSection + 1;
     const result = { sectionId: section.id, sectionTitle: section.title, passed, attempts, response, finalizedAt: new Date().toISOString() };
     let message: string;
