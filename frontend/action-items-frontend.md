@@ -8,7 +8,7 @@
 
 ## 2. Patient Experience (Chat & Voice)
 - [ ] **Chat Interface:** Build a smooth, intuitive chat UI for text-based interaction, including typing indicators and clear demarcations between AI and Patient messages.
-- [ ] **Voice Interface:** Implement the WebRTC/LiveKit client to handle live audio streaming. Add visual indicators for "Listening," "Thinking," and "Speaking."
+- [ ] **Voice Interface:** Implement the ElevenLabs Conversational AI client to handle live audio streaming. Add visual indicators for "Listening," "Thinking," and "Speaking."
 - [ ] **AI Introduction:** Ensure the initial screen clearly introduces the agent as an AI, not a human doctor, satisfying the compliance requirement.
 - [ ] **Section Navigation:** Build the UI to reflect the user's progress through the form's sections without overwhelming them.
 

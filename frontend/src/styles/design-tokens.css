@@ -1,0 +1,67 @@
+@theme {
+  --color-cream: #f7f4ed;
+  --color-charcoal: #1c1c1c;
+  --color-off-white: #fcfbf8;
+  --color-muted: #5f5f5d;
+  --color-border-passive: #eceae4;
+  --color-border-interactive: rgba(28, 28, 28, 0.4);
+  --color-charcoal-83: rgba(28, 28, 28, 0.83);
+  --color-charcoal-04: rgba(28, 28, 28, 0.04);
+  --color-charcoal-03: rgba(28, 28, 28, 0.03);
+
+  --shadow-inset-button: 0px 1px 2px rgba(0, 0, 0, 0.05), inset 0px 1px 1px rgba(255, 255, 255, 0.1);
+  --shadow-focus: rgba(0, 0, 0, 0.1) 0px 4px 12px;
+
+  --radius-micro: 4px;
+  --radius-standard: 6px;
+  --radius-comfortable: 8px;
+  --radius-card: 12px;
+  --radius-container: 16px;
+  --radius-pill: 9999px;
+  
+  --font-sans: "Camera Plain Variable", system-ui, sans-serif;
+
+  /* shadcn UI mappings */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+:root {
+  --background: var(--color-cream);
+  --foreground: var(--color-charcoal);
+  --card: var(--color-cream);
+  --card-foreground: var(--color-charcoal);
+  --popover: var(--color-cream);
+  --popover-foreground: var(--color-charcoal);
+  --primary: var(--color-charcoal);
+  --primary-foreground: var(--color-off-white);
+  --secondary: var(--color-charcoal-04);
+  --secondary-foreground: var(--color-charcoal);
+  --muted: var(--color-charcoal-04);
+  --muted-foreground: var(--color-muted);
+  --accent: var(--color-charcoal-04);
+  --accent-foreground: var(--color-charcoal);
+  --destructive: #ef4444;
+  --destructive-foreground: var(--color-off-white);
+  --border: var(--color-border-passive);
+  --input: var(--color-border-passive);
+  --ring: var(--color-charcoal-83);
+  --radius: 6px;
+}
