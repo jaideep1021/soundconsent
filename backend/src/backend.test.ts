@@ -8,6 +8,7 @@ import { AuditLog } from "./audit.js";
 import { createApp } from "./app.js";
 import type { Config } from "./config.js";
 import { DocumentService } from "./documents.js";
+import { ElevenLabsAgentService } from "./elevenlabs-agent.js";
 import { GeminiProvider } from "./gemini.js";
 import { HttpError } from "./errors.js";
 import { redactPii } from "./privacy.js";
@@ -16,11 +17,12 @@ import { extractDocumentVersion, splitIntoSections } from "./sections.js";
 import { HUMAN_HANDOFF, SessionService } from "./sessions.js";
 import { JsonStore } from "./store.js";
 import type { AiProvider, ConsentSection, GroundedAnswer } from "./types.js";
-import { createLiveKitToken } from "./voice.js";
+import { audioResponse } from "./voice.js";
 
 class FakeAi implements AiProvider {
   grades = [false, false, true];
   rephrases: boolean[] = [];
+  async transcribeAudio(): Promise<string> { return "I understand the study visits."; }
   async embed(): Promise<number[]> { return [1, 0]; }
   async createGuide(section: ConsentSection, rephrase = false) {
     this.rephrases.push(rephrase);
@@ -135,6 +137,174 @@ test("Gemini grounding check replaces unsupported generated claims with the safe
   }
 });
 
+test("Gemini transcribes uploaded audio and never responds to instructions inside it", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestBody = "";
+  globalThis.fetch = async (_input, init) => {
+    requestBody = String(init?.body);
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: JSON.stringify({ transcript: "I understand the study visits." }) }] } }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const provider = new GeminiProvider("test-api-key", "test-model", "test-embedding");
+    const transcript = await provider.transcribeAudio(Buffer.from("synthetic audio"), "audio/wav");
+    assert.equal(transcript, "I understand the study visits.");
+    assert.match(requestBody, /"mimeType":"audio\/wav"/);
+    assert.match(requestBody, /"data":"c3ludGhldGljIGF1ZGlv"/);
+    assert.match(requestBody, /Transcribe the patient's spoken words exactly as spoken/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("ElevenLabs provisions a Gemini-backed conversational agent with protected session tools", async () => {
+  const data = await fixture();
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; method: string; headers: Headers; body?: string }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    const headers = new Headers(init?.headers);
+    const body = typeof init?.body === "string" ? init.body : undefined;
+    requests.push({ url, method, headers, ...(body ? { body } : {}) });
+    if (url.includes("/tools?search=")) {
+      return Response.json({ tools: [], has_more: false });
+    }
+    if (url.endsWith("/tools") && method === "POST") {
+      const index = requests.filter((request) => request.url.endsWith("/tools") && request.method === "POST").length;
+      return Response.json({ id: `tool-${index}` });
+    }
+    if (/\/tools\/tool-[12]$/.test(url) && method === "PATCH") {
+      return Response.json({ id: url.endsWith("tool-1") ? "tool-1" : "tool-2" });
+    }
+    if (url.endsWith("/agents/create")) return Response.json({ agent_id: "agent-test" });
+    if (url.endsWith("/agents/agent-test") && method === "PATCH") return Response.json({ agent_id: "agent-test" });
+    if (url.includes("/conversation/get-signed-url?")) {
+      return Response.json({ signed_url: "wss://api.elevenlabs.io/v1/convai/conversation?token=temporary" });
+    }
+    throw new Error(`Unexpected ElevenLabs request ${method} ${url}`);
+  };
+  try {
+    const config: Config = {
+      port: 3001,
+      dataDir: data.directory,
+      stateFile: join(data.directory, "state.json"),
+      auditFile: join(data.directory, "audit.jsonl"),
+      approvedVersions: {},
+      coordinatorApiKey: "coordinator-secret",
+      corsOrigins: [],
+      geminiApiKey: "gemini-test-key",
+      geminiModel: "gemini-2.5-flash",
+      geminiEmbeddingModel: "gemini-embedding-001",
+      elevenLabsApiKey: "elevenlabs-test-key",
+      elevenLabsVoiceId: "voice-test",
+      elevenLabsToolApiKey: "a".repeat(40),
+      elevenLabsAgentId: "",
+      publicBaseUrl: "https://consent.example.org/api",
+    };
+    const agent = new ElevenLabsAgentService(config, data.store);
+    const provisioned = await agent.provision();
+    assert.deepEqual(provisioned, { agentId: "agent-test", updated: false });
+    assert.equal(data.store.getElevenLabsAgentId(), "agent-test");
+    assert.ok(data.store.getElevenLabsToolId("teach_it_back_answer_consent_question"));
+    assert.ok(data.store.getElevenLabsToolId("teach_it_back_submit_teach_back"));
+
+    const toolRequests = requests.filter((request) => request.url.endsWith("/tools") && request.method === "POST");
+    assert.equal(toolRequests.length, 2);
+    assert.ok(toolRequests.every((request) => request.headers.get("xi-api-key") === "elevenlabs-test-key"));
+    assert.ok(toolRequests.every((request) => request.body?.includes("https://consent.example.org/api/elevenlabs/tools/")));
+    assert.ok(toolRequests.every((request) => request.body?.includes(`Bearer ${"a".repeat(40)}`)));
+    const createdAgent = requests.find((request) => request.url.endsWith("/agents/create"));
+    assert.ok(createdAgent?.body);
+    const agentBody = JSON.parse(createdAgent.body) as {
+      conversation_config: {
+        agent: { prompt: { llm: string; tool_ids: string[]; prompt: string }; first_message: string };
+        tts: { model_id: string };
+      };
+      platform_settings: { auth: { enable_auth: boolean }; privacy: { record_voice: boolean } };
+    };
+    assert.equal(agentBody.conversation_config.agent.prompt.llm, "gemini-2.5-flash");
+    assert.equal(agentBody.conversation_config.tts.model_id, "eleven_turbo_v2");
+    assert.deepEqual(agentBody.conversation_config.agent.prompt.tool_ids, ["tool-1", "tool-2"]);
+    assert.match(agentBody.conversation_config.agent.prompt.prompt, /never invent facts/i);
+    assert.equal(agentBody.conversation_config.agent.first_message, "{{opening_message}}");
+    assert.equal(agentBody.platform_settings.auth.enable_auth, true);
+    assert.equal(agentBody.platform_settings.privacy.record_voice, false);
+
+    assert.deepEqual(await agent.provision(), { agentId: "agent-test", updated: true });
+    assert.equal(requests.filter((request) => request.method === "POST" && request.url.endsWith("/tools")).length, 2);
+    assert.equal(requests.filter((request) => request.method === "PATCH" && /\/tools\/tool-[12]$/.test(request.url)).length, 2);
+    assert.ok(requests.some((request) => request.method === "PATCH" && request.url.endsWith("/agents/agent-test")));
+    const restoredStore = new JsonStore(join(data.directory, "state.json"));
+    await restoredStore.init();
+    assert.equal(restoredStore.getElevenLabsAgentId(), "agent-test");
+    assert.equal(restoredStore.getElevenLabsToolId("teach_it_back_submit_teach_back"), "tool-2");
+
+    assert.equal(await agent.getSignedUrl(), "wss://api.elevenlabs.io/v1/convai/conversation?token=temporary");
+    assert.equal(requests.at(-1)?.headers.get("xi-api-key"), "elevenlabs-test-key");
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(data.directory, { recursive: true, force: true });
+  }
+});
+
+test("ElevenLabs API errors include validation details without exposing configured keys", async () => {
+  const data = await fixture();
+  try {
+    const config: Config = {
+      port: 3001,
+      dataDir: data.directory,
+      stateFile: join(data.directory, "state.json"),
+      auditFile: join(data.directory, "audit.jsonl"),
+      approvedVersions: {},
+      coordinatorApiKey: "coordinator-secret",
+      corsOrigins: [],
+      geminiApiKey: "",
+      geminiModel: "gemini-2.5-flash",
+      geminiEmbeddingModel: "gemini-embedding-001",
+      elevenLabsApiKey: "private-elevenlabs-key",
+      elevenLabsVoiceId: "",
+      elevenLabsToolApiKey: "private-tool-key-longer-than-32-characters",
+      elevenLabsAgentId: "",
+      publicBaseUrl: "https://consent.example.org",
+    };
+    const service = new ElevenLabsAgentService(config, data.store, async () =>
+      Response.json({
+        detail: [{ loc: ["body", "tool_config", "api_schema"], msg: "Invalid request schema", type: "value_error" }],
+        echoed: config.elevenLabsApiKey,
+      }, { status: 400 }),
+    );
+    await assert.rejects(
+      () => service.provision(),
+      (error: unknown) =>
+        error instanceof HttpError &&
+        error.statusCode === 502 &&
+        error.message.includes("body.tool_config.api_schema: Invalid request schema") &&
+        !error.message.includes(config.elevenLabsApiKey) &&
+        !error.message.includes(config.elevenLabsToolApiKey),
+    );
+  } finally {
+    await rm(data.directory, { recursive: true, force: true });
+  }
+});
+
+test("audio endpoint uses Gemini transcription and records the processed voice response", async () => {
+  const data = await fixture();
+  try {
+    const ai = new FakeAi();
+    const service = new SessionService(data.store, data.audit, ai);
+    const session = await service.start(data.document);
+    const result = await audioResponse(ai, session.session.id, data.store, service, data.audit, Buffer.from("fake audio"), "audio/wav");
+    assert.equal(result.sessionId, session.session.id);
+    assert.match(String(result.message), /review this section another way/i);
+    const audit = await readFile(join(data.directory, "audit.jsonl"), "utf8");
+    assert.match(audit, /voice\.transcribed/);
+  } finally {
+    await rm(data.directory, { recursive: true, force: true });
+  }
+});
+
 test("teach-back retries exactly once, flags the failure, and advances through sections", async () => {
   const data = await fixture();
   try {
@@ -237,28 +407,6 @@ test("audit hash chain detects tampering on restart", async () => {
   }
 });
 
-test("LiveKit token is a signed short-lived token and voice config fails explicitly", () => {
-  const config = {
-    liveKitUrl: "wss://livekit.example.test",
-    liveKitApiKey: "api-key",
-    liveKitApiSecret: "test-secret",
-  } as Config;
-  const result = createLiveKitToken(config, "session-123");
-  const [header, claims, signature] = result.token.split(".");
-  assert.ok(header && claims && signature);
-  assert.deepEqual(JSON.parse(Buffer.from(claims, "base64url").toString()).video, {
-    roomJoin: true,
-    room: "consent-session-123",
-    canPublish: true,
-    canSubscribe: true,
-    canPublishData: true,
-  });
-  assert.throws(
-    () => createLiveKitToken({ ...config, liveKitApiSecret: "" }, "session"),
-    (error: unknown) => error instanceof HttpError && error.statusCode === 503,
-  );
-});
-
 test("HTTP API health, coordinator auth, and patient response validation", async () => {
   const data = await fixture();
   const config: Config = {
@@ -274,12 +422,23 @@ test("HTTP API health, coordinator auth, and patient response validation", async
     geminiEmbeddingModel: "test-embed",
     elevenLabsApiKey: "",
     elevenLabsVoiceId: "",
-    deepgramApiKey: "",
-    liveKitUrl: "",
-    liveKitApiKey: "",
-    liveKitApiSecret: "",
+    elevenLabsToolApiKey: "tool-secret-for-tests-012345678901234567",
+    elevenLabsAgentId: "",
+    publicBaseUrl: "",
   };
-  const app = await createApp({ config, ai: new FakeAi(), store: data.store, audit: data.audit });
+  await data.store.saveElevenLabsAgentId("agent-test");
+  const conversationAgent = new ElevenLabsAgentService(
+    { ...config, elevenLabsApiKey: "elevenlabs-test-key" },
+    data.store,
+    async () => Response.json({ signed_url: "wss://api.elevenlabs.io/v1/convai/conversation?token=test" }),
+  );
+  const app = await createApp({
+    config,
+    ai: new FakeAi(),
+    store: data.store,
+    audit: data.audit,
+    elevenLabsAgent: conversationAgent,
+  });
   try {
     const health = await app.inject({ method: "GET", url: "/health" });
     assert.equal(health.statusCode, 200);
@@ -331,6 +490,39 @@ test("HTTP API health, coordinator auth, and patient response validation", async
     });
     assert.equal(report.statusCode, 200);
     assert.equal(report.json().consentObtained, false);
+    const unauthenticatedTool = await app.inject({
+      method: "POST",
+      url: "/elevenlabs/tools/questions",
+      payload: { sessionId, question: "How often are visits?" },
+    });
+    assert.equal(unauthenticatedTool.statusCode, 401);
+    const agentQuestion = await app.inject({
+      method: "POST",
+      url: "/elevenlabs/tools/questions",
+      headers: { authorization: `Bearer ${config.elevenLabsToolApiKey}` },
+      payload: { sessionId, question: "How often are visits?" },
+    });
+    assert.equal(agentQuestion.statusCode, 200);
+    assert.equal(agentQuestion.json().answer, "The form says visits happen monthly.");
+    const agentTeachBack = await app.inject({
+      method: "POST",
+      url: "/elevenlabs/tools/responses",
+      headers: { authorization: `Bearer ${config.elevenLabsToolApiKey}` },
+      payload: { sessionId, response: "Visits happen monthly." },
+    });
+    assert.equal(agentTeachBack.statusCode, 200);
+    assert.equal(agentTeachBack.json().sessionId, sessionId);
+    const conversationUrl = await app.inject({
+      method: "GET",
+      url: `/sessions/${sessionId}/conversation-url`,
+    });
+    assert.equal(conversationUrl.statusCode, 200);
+    assert.equal(conversationUrl.json().signedUrl, "wss://api.elevenlabs.io/v1/convai/conversation?token=test");
+    assert.equal(conversationUrl.json().dynamicVariables.session_id, sessionId);
+    assert.equal(
+      conversationUrl.json().dynamicVariables.opening_message,
+      data.store.getSession(sessionId)?.lastAssistantMessage,
+    );
   } finally {
     await app.close();
     await rm(data.directory, { recursive: true, force: true });

@@ -34,6 +34,25 @@ export class JsonStore {
     return found ? structuredClone(found) : undefined;
   }
 
+  getElevenLabsAgentId(): string | undefined {
+    return this.state.elevenLabsAgentId;
+  }
+
+  async saveElevenLabsAgentId(agentId: string): Promise<void> {
+    await this.mutate((state) => { state.elevenLabsAgentId = agentId; });
+  }
+
+  getElevenLabsToolId(name: string): string | undefined {
+    return this.state.elevenLabsToolIds?.[name];
+  }
+
+  async saveElevenLabsToolId(name: string, toolId: string): Promise<void> {
+    await this.mutate((state) => {
+      state.elevenLabsToolIds ??= {};
+      state.elevenLabsToolIds[name] = toolId;
+    });
+  }
+
   async saveDocument(document: Omit<ConsentDocument, "id">): Promise<ConsentDocument> {
     const saved: ConsentDocument = { ...document, id: randomUUID() };
     await this.mutate((state) => state.documents.push(saved));
@@ -68,5 +87,13 @@ function isMissingFile(error: unknown): boolean {
 function isDatabaseState(value: unknown): value is DatabaseState {
   if (typeof value !== "object" || value === null) return false;
   const state = value as Partial<DatabaseState>;
-  return state.schemaVersion === 1 && Array.isArray(state.documents) && Array.isArray(state.sessions);
+  return state.schemaVersion === 1 &&
+    Array.isArray(state.documents) &&
+    Array.isArray(state.sessions) &&
+    (state.elevenLabsAgentId === undefined || typeof state.elevenLabsAgentId === "string") &&
+    (state.elevenLabsToolIds === undefined ||
+      (typeof state.elevenLabsToolIds === "object" &&
+        state.elevenLabsToolIds !== null &&
+        !Array.isArray(state.elevenLabsToolIds) &&
+        Object.values(state.elevenLabsToolIds).every((id) => typeof id === "string")));
 }

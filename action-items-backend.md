@@ -14,12 +14,13 @@
 
 ## 3. Voice & Streaming Infrastructure
 - [x] **TTS Integration:** Integrate the **ElevenLabs API** for low-latency, high-quality Text-to-Speech generation.
-- [x] **STT Integration:** Integrate a Speech-to-Text service (e.g., Deepgram) for processing patient voice input.
-- [ ] **WebRTC Setup:** Set up WebRTC (e.g., LiveKit or Pipecat) to handle bidirectional, low-latency streaming audio (targeting <800ms). The backend issues LiveKit room credentials, but the frontend client and streaming media worker are not included; end-to-end streaming and latency remain incomplete.
+- [x] **Conversational Agent API:** Provision a private ElevenLabs Conversational AI agent with Gemini-backed, authenticated webhook tools for consent Q&A and teach-back grading. The client must still request a signed URL and pass the returned session dynamic variables to ElevenLabs.
+- [x] **STT Integration:** Integrate speech-to-text using Gemini audio understanding for processing recorded patient voice input; no separate STT provider is used.
+- [ ] **WebRTC Setup:** Set up a first-party WebRTC client/media worker to handle bidirectional, low-latency streaming audio (targeting <800ms). ElevenLabs Conversational AI can provide the voice conversation through its own realtime client, and the backend provisions the agent and signed-URL flow, but this repository does not yet include a client integration or measured end-to-end latency.
 
 ## 4. Middleware & Reporting
 - [x] **Session & State Management:** Build the service to track the patient's progress through the form sections, logging passes, fails, and out-of-scope questions.
 - [ ] **Compliance & Privacy:** Implement middleware to strip/mask PII before sending data to external LLMs. Ensure all interactions are immutably logged. Pattern-based redaction and a tamper-evident hash chain are implemented; complete de-identification and immutable/WORM audit storage remain incomplete.
 - [x] **Understanding Report Generation:** Create the logic and endpoint to compile the session logs into the final "Understanding Report" for the Clinical Coordinator.
 
-**Prototype limitations:** A secondary LLM check and fail-closed fallback reduce risk but cannot prove the PRD's absolute 0% hallucination KPI. Clinical, privacy, security, and regulatory validation are required before real-world use. LiveKit credentials are provided, but the frontend client, bidirectional media worker, measured sub-800ms streaming, complete PII de-identification, and immutable audit storage remain outstanding.
+**Prototype limitations:** A secondary LLM check and fail-closed fallback reduce risk but cannot prove the PRD's absolute 0% hallucination KPI. Clinical, privacy, security, and regulatory validation are required before real-world use. The client-side ElevenLabs conversation startup, first-party real-time WebRTC client/media worker, measured sub-800ms streaming, complete PII de-identification, and immutable audit storage remain outstanding.

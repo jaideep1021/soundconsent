@@ -9,7 +9,8 @@ import { DocumentService } from "./documents.js";
 import { SessionService } from "./sessions.js";
 import { AuditLog } from "./audit.js";
 import { JsonStore } from "./store.js";
-import { audioResponse, createLiveKitToken, synthesizeSpeech } from "./voice.js";
+import { audioResponse, synthesizeSpeech } from "./voice.js";
+import { ElevenLabsAgentService, requireElevenLabsTool } from "./elevenlabs-agent.js";
 import type { AiProvider } from "./types.js";
 
 export interface AppOptions {
@@ -17,6 +18,7 @@ export interface AppOptions {
   ai?: AiProvider;
   store?: JsonStore;
   audit?: AuditLog;
+  elevenLabsAgent?: ElevenLabsAgentService;
 }
 
 export async function createApp(options: AppOptions): Promise<FastifyInstance> {
@@ -33,6 +35,7 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
   const ai = options.ai ?? new GeminiProvider(config.geminiApiKey, config.geminiModel, config.geminiEmbeddingModel);
   const documents = new DocumentService(store, audit, ai, config.approvedVersions);
   const sessions = new SessionService(store, audit, ai);
+  const elevenLabsAgent = options.elevenLabsAgent ?? new ElevenLabsAgentService(config, store);
 
   app.setErrorHandler((error, _request, reply) => {
     const status = error instanceof HttpError ? error.statusCode
@@ -46,6 +49,40 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
   });
 
   app.get("/health", async () => ({ status: "ok" }));
+
+  app.post("/agents/provision", async (request) => {
+    requireCoordinator(request, config);
+    return elevenLabsAgent.provision();
+  });
+
+  app.get<{ Params: { id: string } }>("/sessions/:id/conversation-url", async (request) => {
+    const session = store.getSession(request.params.id);
+    if (!session) throw new HttpError(404, "Session not found");
+    const signedUrl = await elevenLabsAgent.getSignedUrl();
+    return {
+      signedUrl,
+      dynamicVariables: {
+        session_id: session.id,
+        opening_message: session.lastAssistantMessage,
+      },
+    };
+  });
+
+  app.post<{ Body: { sessionId?: unknown; question?: unknown } }>("/elevenlabs/tools/questions", async (request) => {
+    requireElevenLabsTool(request, config);
+    const { sessionId, question } = request.body ?? {};
+    if (typeof sessionId !== "string" || !sessionId.trim()) throw new HttpError(400, "sessionId is required");
+    if (typeof question !== "string") throw new HttpError(400, "question is required");
+    return sessions.ask(sessionId, question);
+  });
+
+  app.post<{ Body: { sessionId?: unknown; response?: unknown } }>("/elevenlabs/tools/responses", async (request) => {
+    requireElevenLabsTool(request, config);
+    const { sessionId, response } = request.body ?? {};
+    if (typeof sessionId !== "string" || !sessionId.trim()) throw new HttpError(400, "sessionId is required");
+    if (typeof response !== "string") throw new HttpError(400, "response is required");
+    return sessions.respond(sessionId, response);
+  });
 
   app.post("/documents", async (request, reply) => {
     requireCoordinator(request, config);
@@ -118,14 +155,7 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
     if (part.fieldname !== "file") throw new HttpError(400, "Audio must use the file field");
     const bytes = await part.toBuffer();
     if (part.file.truncated) throw new HttpError(413, "Audio exceeds the 10 MiB limit");
-    return audioResponse(config, request.params.id, store, sessions, audit, bytes, part.mimetype);
-  });
-
-  app.post<{ Params: { id: string } }>("/sessions/:id/livekit-token", async (request) => {
-    const session = store.getSession(request.params.id);
-    if (!session || session.status !== "in_progress") throw new HttpError(404, "Active session not found");
-    await audit.append("voice.webrtc_token_issued", {}, session.id);
-    return createLiveKitToken(config, session.id);
+    return audioResponse(ai, request.params.id, store, sessions, audit, bytes, part.mimetype);
   });
 
   app.post<{ Params: { id: string } }>("/sessions/:id/speech", async (request, reply) => {

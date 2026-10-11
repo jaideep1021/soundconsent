@@ -42,6 +42,8 @@ export interface DatabaseState {
   schemaVersion: 1;
   documents: ConsentDocument[];
   sessions: ReviewSession[];
+  elevenLabsAgentId?: string;
+  elevenLabsToolIds?: Record<string, string>;
 }
 
 export interface SectionGuide {
@@ -57,6 +59,7 @@ export interface GroundedAnswer {
 
 export interface AiProvider {
   embed(text: string): Promise<number[]>;
+  transcribeAudio(audio: Buffer, mimeType: string): Promise<string>;
   createGuide(section: ConsentSection, rephrase?: boolean): Promise<SectionGuide>;
   grade(section: ConsentSection, response: string): Promise<boolean>;
   answerQuestion(question: string, sections: ConsentSection[]): Promise<GroundedAnswer>;

@@ -16,10 +16,9 @@ export interface Config {
   geminiEmbeddingModel: string;
   elevenLabsApiKey: string;
   elevenLabsVoiceId: string;
-  deepgramApiKey: string;
-  liveKitUrl: string;
-  liveKitApiKey: string;
-  liveKitApiSecret: string;
+  elevenLabsToolApiKey: string;
+  elevenLabsAgentId: string;
+  publicBaseUrl: string;
 }
 
 export async function loadConfig(): Promise<Config> {
@@ -56,10 +55,9 @@ export async function loadConfig(): Promise<Config> {
     geminiEmbeddingModel: process.env.GEMINI_EMBEDDING_MODEL?.trim() || "gemini-embedding-001",
     elevenLabsApiKey: process.env.ELEVENLABS_API_KEY?.trim() ?? "",
     elevenLabsVoiceId: process.env.ELEVENLABS_VOICE_ID?.trim() ?? "",
-    deepgramApiKey: process.env.DEEPGRAM_API_KEY?.trim() ?? "",
-    liveKitUrl: process.env.LIVEKIT_URL?.trim() ?? "",
-    liveKitApiKey: process.env.LIVEKIT_API_KEY?.trim() ?? "",
-    liveKitApiSecret: process.env.LIVEKIT_API_SECRET?.trim() ?? "",
+    elevenLabsToolApiKey: process.env.ELEVENLABS_TOOL_API_KEY?.trim() ?? "",
+    elevenLabsAgentId: process.env.ELEVENLABS_AGENT_ID?.trim() ?? "",
+    publicBaseUrl: process.env.PUBLIC_BASE_URL?.trim() ?? "",
   };
 }
 
