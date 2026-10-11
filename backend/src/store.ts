@@ -4,15 +4,20 @@ import { dirname } from "node:path";
 import { HttpError } from "./errors.js";
 import type { AuthState, ConsentDocument, DatabaseState, ReviewSession, StudySettings, FollowUp, DeliveryNotification } from "./types.js";
 
+import type { PostgresDatabase } from "./postgres.js";
+
 const EMPTY_STATE: DatabaseState = { schemaVersion: 1, documents: [], sessions: [] };
 
 export class JsonStore {
-  private state: DatabaseState = structuredClone(EMPTY_STATE);
+  private localState: DatabaseState = structuredClone(EMPTY_STATE);
+  private get state(): DatabaseState { return this.database ? this.database.current().state : this.localState; }
+  private set state(value: DatabaseState) { this.localState = value; }
   private writeQueue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly file: string) {}
+  constructor(private readonly file: string, private readonly database?: PostgresDatabase) {}
 
   async init(): Promise<void> {
+    if (this.database) return;
     await mkdir(dirname(this.file), { recursive: true });
     try {
       const parsed: unknown = JSON.parse(await readFile(this.file, "utf8"));
@@ -136,6 +141,12 @@ export class JsonStore {
   }
 
   private async mutate(change: (state: DatabaseState) => void): Promise<void> {
+    if (this.database) {
+      const next = structuredClone(this.state);
+      change(next);
+      await this.database.save(next);
+      return;
+    }
     const write = this.writeQueue.then(async () => {
       const next = structuredClone(this.state);
       change(next);
@@ -153,7 +164,7 @@ function isMissingFile(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
-function isDatabaseState(value: unknown): value is DatabaseState {
+export function isDatabaseState(value: unknown): value is DatabaseState {
   if (typeof value !== "object" || value === null) return false;
   const state = value as Partial<DatabaseState>;
   return state.schemaVersion === 1 &&

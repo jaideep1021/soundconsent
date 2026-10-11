@@ -38,17 +38,62 @@ without surrounding quotes or a page path) and `PUBLIC_BASE_URL` to the public
 backend URL; configure provider and bootstrap credentials as described below.
 The Vercel dashboard settings have to be verified separately from local `.env`.
 
-**Storage remains a runtime blocker for durable Vercel use.** The current backend
-writes accounts, tokens, documents, sessions, and notification state to `state.json`
-and audit events to `audit.jsonl`. The function bundle is read-only. Explicitly
-setting `DATA_DIR=/tmp/soundconsent` can support a disposable, synthetic-data smoke
-test only: files can disappear and are not shared across instances. This is not a
-persistent deployment solution. No automatic `/tmp` fallback is implemented.
-Migrate state and audit events to shared durable storage (with transactional
-concurrency controls) or use the single-instance Docker deployment with its
-persistent volume before storing real records. The in-process notification timer
-also needs a durable scheduled worker on serverless hosting. `/health` alone does
-not prove persistence, authentication, upload limits, or provider workflows.
+**Postgres is required on Vercel.** Connect a Postgres database (for example Neon
+through Vercel Storage) to the **backend project only**, then verify `DATABASE_URL`
+is available to its Production deployment. Use the provider's pooled URL with its
+TLS parameters intact; the application does not disable certificate verification.
+Never place this URL in the frontend or a `VITE_*` variable. Use a separate database
+or branch for Preview rather than sharing production state with preview code.
+
+Keep `BOOTSTRAP_COORDINATOR_EMAIL` and `BOOTSTRAP_COORDINATOR_PASSWORD` configured
+for the first database-backed startup. The initial administrator is created only
+when the shared account list is empty; concurrent cold starts cannot create duplicates.
+After verifying login, remove both bootstrap variables and redeploy. Existing accounts
+remain in Postgres. Keep `CORS_ORIGIN=https://soundconsent.vercel.app` for the current
+frontend, and `NOTIFICATION_DELIVERY_ENABLED=false` (or unset).
+
+The first startup creates `soundconsent_state` and `soundconsent_audit` if absent,
+so the database role needs schema/table creation rights as well as SELECT, INSERT,
+UPDATE and sequence usage. Existing tables and records are never cleared at startup.
+Accounts, grants, documents, sessions, settings, and notification records use a
+shared JSONB snapshot. Audit records retain their hash-chained serialization in a
+separate table. Each request locks the shared state row, loads fresh state, and commits
+state and audit changes before a successful response is sent. Error responses roll
+back. Database failures never fall back to files. Login cookies therefore work across
+instances, and logout/revocation takes effect on subsequent requests everywhere.
+
+This first adapter deliberately serializes requests to preserve the existing service
+semantics, including revision checks and replay keys. It is intended for a small
+prototype: AI calls hold the lock, lock waits are bounded to 15 seconds, and a busy
+database returns 503. Larger workloads need normalized tables and narrower transaction
+boundaries. Startup verifies the full audit chain; that cost grows with audit history.
+Login throttles are still per-process; distributed rate limiting remains separate work.
+The in-process external notification worker is rejected in Postgres mode until a
+durable scheduled worker is implemented. In-app follow-up notifications still work.
+
+`DATA_DIR` is ignored for mutable storage in Postgres mode. Local/Docker deployments
+without `DATABASE_URL` retain their existing single-process file storage and approval
+mount. Vercel refuses to start without `DATABASE_URL` so it cannot silently return to
+instance-local sessions. The approved-version allow-list remains separate and unchanged.
+
+**Migration:** this creates a new empty database store; it does not import temporary
+Vercel files or local Docker records. Existing temporary cookies will require a new
+sign-in. If old records must be preserved, stop writers and back up the state and audit
+files together before arranging an explicit migration. Do not expect `/tmp` records
+to be recoverable across instances. Configure provider backups for the new database.
+
+### Postgres verification
+
+`npm run typecheck`, `npm test`, and `npm run build` cover local behavior. To include
+the real database integration test, set `POSTGRES_TEST_URL` to a **dedicated disposable
+local test database whose name ends in `_test`**, then run `npm test`. That test resets
+its SoundConsent tables and checks concurrent bootstrap, cross-instance cookies,
+concurrent writes, stale revisions, transaction rollback, logout, cold starts and audit
+tampering. Never point it at application data. Without the variable it is skipped.
+
+After deployment check `/health`, then sign in through the frontend and refresh the
+dashboard several times. `/api/auth/me`, `/api/documents`, and `/api/sessions` should
+remain 200 while signed in. Sign out and confirm the previous session is rejected.
 
 After committing the changes, redeploy the new commit (redeploying an older commit
 will not include this fix). Verify `/health` and a synthetic end-to-end flow.

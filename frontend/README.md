@@ -44,9 +44,8 @@ from `/api/auth/me` before signing in is expected. Vercel deployment protection 
 the backend can block the proxy; check for a Vercel login page if API responses are
 unexpected HTML. Environment changes require a new deployment.
 
-The backend's `/tmp` storage is disposable and can lose accounts and reviews across
-instances/restarts. This frontend setup does not resolve that storage limitation.
-Use synthetic data until durable storage is implemented.
+The Vercel backend requires `DATABASE_URL` for shared Postgres storage. See the backend
+README for database setup, initial administrator creation, and migration limitations.
 
 [Vercel external rewrites](https://vercel.com/docs/routing/rewrites) provide the API proxy.
 

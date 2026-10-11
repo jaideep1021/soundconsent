@@ -13,7 +13,18 @@ test("approval configuration stays fail-closed across Vercel and Docker paths", 
     for (const key of Object.keys(process.env)) delete process.env[key];
     process.env.DATA_DIR = directory;
     process.env.VERCEL = "1";
+    process.env.DATABASE_URL = "postgresql://localhost/test";
     process.chdir(directory);
+    await t.test("Vercel rejects missing database configuration and unsupported notification worker", async () => {
+      delete process.env.DATABASE_URL;
+      await assert.rejects(loadConfig(), /DATABASE_URL is required on Vercel/);
+      process.env.DATABASE_URL = "not-a-url";
+      await assert.rejects(loadConfig(), /Postgres connection URL/);
+      process.env.DATABASE_URL = "postgresql://localhost/test";
+      process.env.NOTIFICATION_DELIVERY_ENABLED = "true";
+      await assert.rejects(loadConfig(), /durable worker/);
+      delete process.env.NOTIFICATION_DELIVERY_ENABLED;
+    });
     const bundled = JSON.parse(await readFile(new URL("../data/approved-versions.json", import.meta.url), "utf8"));
     await t.test("bundled approvals work outside the backend working directory", async () => {
       assert.deepEqual((await loadConfig()).approvedVersions, bundled);

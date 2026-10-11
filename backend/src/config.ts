@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { HttpError } from "./errors.js";
 
 export interface Config {
+  databaseUrl?: string;
   logLevel?: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
   trustProxy?: string[];
   notificationWebhookUrl?: string;
@@ -31,6 +32,14 @@ export interface Config {
 }
 
 export async function loadConfig(): Promise<Config> {
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  if (process.env.DATABASE_URL !== undefined && !databaseUrl) throw new HttpError(500, "DATABASE_URL must not be empty");
+  if (databaseUrl) {
+    try { if (!["postgres:", "postgresql:"].includes(new URL(databaseUrl).protocol)) throw new Error(); }
+    catch { throw new HttpError(500, "DATABASE_URL must be a Postgres connection URL"); }
+  }
+  if (process.env.VERCEL === "1" && !databaseUrl) throw new HttpError(500, "DATABASE_URL is required on Vercel; local files cannot share login sessions across instances");
+  if (databaseUrl && process.env.NOTIFICATION_DELIVERY_ENABLED === "true") throw new HttpError(500, "Postgres notification delivery requires a durable worker; keep NOTIFICATION_DELIVERY_ENABLED=false");
   const logLevel = process.env.LOG_LEVEL?.trim() || "info";
   if (!["fatal", "error", "warn", "info", "debug", "trace", "silent"].includes(logLevel)) {
     throw new HttpError(500, "LOG_LEVEL must be fatal, error, warn, info, debug, trace or silent");
@@ -76,6 +85,7 @@ export async function loadConfig(): Promise<Config> {
   }
   if (notificationDeliveryEnabled && (!notificationWebhookUrl || notificationWebhookSecret.length < 32)) throw new HttpError(500, "Enable notification delivery only with an HTTPS webhook and a secret of at least 32 characters");
   return {
+    ...(databaseUrl ? { databaseUrl } : {}),
     logLevel: logLevel as NonNullable<Config["logLevel"]>,
     trustProxy,
     notificationWebhookUrl, notificationWebhookSecret, notificationDeliveryEnabled,
