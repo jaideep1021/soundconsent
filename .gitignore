@@ -1,1 +1,6 @@
 .env
+/backend/node_modules/
+/backend/dist/
+/backend/data/state.json
+/backend/data/state.json.tmp
+/backend/data/audit.jsonl
