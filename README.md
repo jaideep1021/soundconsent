@@ -119,8 +119,8 @@ The dollar figures value capacity that staff can redirect; they are not automati
 1. **Prepare the source.** A coordinator uploads an ICF PDF. The backend extracts its version, checks it against a configured study/version allow-list, and divides the text into sections. New reviews preserve a snapshot of the published content.
 2. **Invite the patient.** Assign a review to an existing patient username, or create a first-time invitation with a private link and separate access code. Patients can sign back in to resume their assigned studies.
 3. **Explain a section.** The assistant identifies itself as AI and presents a plain-language explanation, targeting a sixth- to eighth-grade reading level.
-4. **Check understanding.** The patient asks questions or explains the section in their own words. Questions and ambiguous acknowledgments do not consume a teach-back attempt. By default, an unsuccessful attempt gets one re-explanation; a second unsuccessful attempt creates a follow-up flag and advances the review. Study settings allow one to three total attempts.
-5. **Route unresolved questions.** Answers are generated from the consent text with a secondary grounding check. Unsupported or medical-advice questions are directed to the clinical team and recorded for follow-up.
+4. **Check understanding.** The patient asks questions or explains the section in their own words. Assessment uses the exact saved teach-back question, the source section, and the patient's response, including after re-explanation or resuming a review. Questions and ambiguous acknowledgments do not consume a teach-back attempt. By default, an unsuccessful attempt gets one re-explanation; a second unsuccessful attempt creates a follow-up flag and advances the review. Study settings allow one to three total attempts.
+5. **Answer and route concerns.** Study-specific answers must be supported by the consent text. The assistant may also offer clearly labeled general educational information beyond the form. A secondary model check reviews accuracy, source support for study claims, and safety. Sensitive or personal medical concerns and missing study details require a doctor-confirmation recommendation and a recorded follow-up flag. Answers that fail verification are replaced with an uncertainty message and follow-up. These checks do not independently validate medical facts.
 6. **Review and hand off.** The coordinator reads the Understanding Report, reviews assessments and questions, and assigns or resolves follow-ups. The human investigator or authorized delegate conducts the final consent discussion.
 
 For example, a patient might say, “I have to stay in the study once I join.” The assistant checks that statement against the form's withdrawal section, clarifies the source information, and asks again. If understanding remains unclear, the report preserves that gap for the coordinator.
@@ -149,9 +149,9 @@ flowchart LR
     Dashboard --> API
     API --> Workflow[Document processing and review workflow]
     Workflow --> AI[Google API: text, embeddings, transcription]
-    Workflow --> Grounding[Source-grounding check]
+    Workflow --> Grounding[Model grounding and safety checks]
     Grounding --> Workflow
-    Workflow --> Store[(Local JSON state and section vectors)]
+    Workflow --> Store[(Local JSON or Postgres state and section vectors)]
     Workflow --> Audit[(Hash-chained audit log)]
     API -->|Signed conversation URL| UI
     UI <-->|Live audio| Voice[ElevenLabs]
@@ -164,7 +164,7 @@ flowchart LR
 - **Backend:** TypeScript on Node.js 24+, Fastify, PDF extraction, document/version controls, session orchestration, reporting, and authentication.
 - **AI:** Google-hosted text generation and assessment, Gemini embeddings for section retrieval, and Gemini audio transcription. Model selection is configurable in the backend; see [the environment template](backend/.env.example) for repository defaults.
 - **Voice:** ElevenLabs browser SDK over WebSocket. Client tools execute through the signed-in browser and normal backend API. Browser voice does not need a public webhook tunnel; legacy server-to-server tools do.
-- **Persistence:** Local JSON stores documents, vectors, accounts, reviews, and follow-ups. An append-only hash chain provides audit tamper evidence. Run **one backend process per data directory**.
+- **Persistence:** Local JSON stores documents, vectors, accounts, reviews, and follow-ups; run **one backend process per data directory** in file mode. An optional Postgres adapter stores shared state in a JSONB snapshot and is required on Vercel. It serializes requests, including AI calls, through a shared row lock and is intended for small prototype workloads. A hash-chained audit log provides tamper evidence. See [Postgres deployment and limitations](backend/README.md#vercel-deployment).
 
 ## Run locally
 
@@ -255,10 +255,10 @@ Both packages include Dockerfiles. See the [backend deployment guide](backend/RE
 
 The prototype has material limits:
 
-- **Clinical validation:** No clinical effectiveness study is included. A source-grounding evaluator reduces risk but cannot prove the PRD's zero-hallucination target. Human review remains essential.
+- **Clinical validation:** No clinical effectiveness study is included. Guide generation uses source-grounding checks; question answers use accuracy and safety checks that permit labeled general education. Generation and verification use the same configured text model and can share errors. These checks cannot prove the PRD's zero-hallucination target. Teach-back assessments are not clinically validated, and human review remains essential.
 - **Privacy and audit:** Pattern-based masking is not complete de-identification, and hash-chained logging is not immutable/WORM storage. Provider data flows, retention, and institutional privacy/security requirements need review before handling real patient data.
 - **Approval and identity:** Version checks enforce a local allow-list, not a live IRB registry. Account or invitation possession is not clinical identity proofing. Completion acknowledgment is not an electronic consent signature.
-- **Operations:** JSON persistence and in-process coordination require a single backend writer. Distributed storage, broader authentication hardening, and password recovery remain future work.
+- **Operations:** File persistence requires a single backend writer. Postgres supports shared persistence but serializes requests through one state row; scaling beyond small prototype workloads needs narrower transactions and a different data layout. Distributed rate limiting, broader authentication hardening, and password recovery remain future work.
 - **Voice and accessibility:** Live browser voice is integrated, but measured sub-800 ms latency, clinical language validation, and comprehensive manual accessibility validation are not established. Notification relay acceptance also does not establish clinician receipt or action.
 
 ## Repository guide

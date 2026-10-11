@@ -29,7 +29,7 @@ class FakeAi implements AiProvider {
     this.rephrases.push(rephrase);
     return { summary: `This explains ${section.title}.`, question: `What does ${section.title} explain?` };
   }
-  async grade(): Promise<boolean> { return this.grades.shift() ?? false; }
+  async grade(_section: ConsentSection, _response: string, _question: string): Promise<boolean> { return this.grades.shift() ?? false; }
   async answerQuestion(_question: string, _sections: ConsentSection[]): Promise<GroundedAnswer> {
     return { answer: "The form says visits happen monthly.", citations: ["Study Procedures"], requiresClinician: false };
   }
@@ -187,6 +187,31 @@ test("Gemini rejects fabricated citations before accepting an educational answer
   }
 });
 
+test("Gemini grading receives the exact redacted question and refuses an empty question", async () => {
+  const originalFetch = globalThis.fetch;
+  const inputs: unknown[] = [];
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    inputs.push(JSON.parse(body.contents[0].parts[0].text));
+    return Response.json({ candidates: [{ content: { parts: [{ text: '{"pass":true}' }] } }] });
+  };
+  try {
+    const provider = new GeminiProvider("test-key", "test-model", "test-embedding");
+    const section = { id: "visits", title: "Visits", text: "Visits happen monthly. Contact nurse@example.org.", embedding: [] };
+    const question = "How often are visits? Contact nurse@example.org for help.";
+    assert.equal(await provider.grade(section, "Monthly; my email is patient@example.org.", question), true);
+    assert.deepEqual(inputs, [{
+      source: "Visits happen monthly. Contact [REDACTED_EMAIL].",
+      question: "How often are visits? Contact [REDACTED_EMAIL] for help.",
+      patientResponse: "Monthly; my email is [REDACTED_EMAIL].",
+    }]);
+    assert.equal(await provider.grade(section, "Monthly", "  "), false);
+    assert.equal(inputs.length, 1, "An unknown question must never be sent for grading");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Gemini retries transient provider failures, bounds retries and preserves permanent errors", async () => {
   const originalFetch = globalThis.fetch;
   const provider = new GeminiProvider("test-api-key", "test-model", "test-embedding");
@@ -200,7 +225,7 @@ test("Gemini retries transient provider failures, bounds retries and preserves p
           ? new Response("busy", { status, headers: { "retry-after": "0" } })
           : new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"pass":true}' }] } }] }));
       };
-      assert.equal(await provider.grade({ id: "purpose", title: "Purpose", text: "Monthly visits", embedding: [] }, "Monthly visits"), true);
+      assert.equal(await provider.grade({ id: "purpose", title: "Purpose", text: "Monthly visits", embedding: [] }, "Monthly visits", "How often are the visits?"), true);
       assert.equal(calls, 2);
       assert.equal(bodies[0], bodies[1]);
     }
@@ -467,6 +492,58 @@ test("teach-back retries exactly once, flags the failure, and advances through s
     const log = await readFile(join(data.directory, "audit.jsonl"), "utf8");
     assert.match(log, /teachback.flagged/);
     assert.match(log, /session.completed/);
+  } finally {
+    await rm(data.directory, { recursive: true, force: true });
+  }
+});
+
+test("grading preserves the displayed question through Q&A, re-explanation and restart", async () => {
+  const data = await fixture();
+  try {
+    const ai = new FakeAi();
+    ai.createGuide = async (_section, rephrase = false) => ({
+      summary: "This study aims to learn about the condition.",
+      question: rephrase ? "What are the researchers hoping to learn?" : "What is this study's purpose?",
+    });
+    const graded: Array<{ question: string; response: string }> = [];
+    ai.grade = async (_section: ConsentSection, response: string, question: string) => {
+      graded.push({ question, response });
+      return graded.length > 1;
+    };
+    const service = new SessionService(data.store, data.audit, ai);
+    const started = await service.start(data.document);
+    await service.ask(started.session.id, "How often are visits?");
+    await service.respond(started.session.id, "I am unsure of the purpose");
+    const restored = new JsonStore(join(data.directory, "state.json"));
+    await restored.init();
+    const resumed = new SessionService(restored, data.audit, ai);
+    await resumed.ask(started.session.id, "Can you explain the visits?");
+    await resumed.respond(started.session.id, "The researchers want to learn about the condition");
+    assert.deepEqual(graded, [
+      { question: "What is this study's purpose?", response: "I am unsure of the purpose" },
+      { question: "What are the researchers hoping to learn?", response: "The researchers want to learn about the condition" },
+    ]);
+    assert.equal(restored.getSession(started.session.id)?.sectionIndex, 1);
+  } finally {
+    await rm(data.directory, { recursive: true, force: true });
+  }
+});
+
+test("legacy reviews without a saved question re-explain instead of inventing a passing assessment", async () => {
+  const data = await fixture();
+  try {
+    const ai = new FakeAi();
+    ai.grade = async () => { throw new Error("Cannot grade without the displayed question"); };
+    const service = new SessionService(data.store, data.audit, ai);
+    const started = await service.start(data.document);
+    delete started.session.guide;
+    await data.store.saveSession(started.session);
+    const result = await service.respond(started.session.id, "The study teaches us about the condition");
+    assert.match(String(result.message), /review this section another way/i);
+    const saved = data.store.getSession(started.session.id)!;
+    assert.equal(saved.sectionIndex, 0);
+    assert.equal(saved.results.length, 0);
+    assert.ok(saved.guide?.question);
   } finally {
     await rm(data.directory, { recursive: true, force: true });
   }

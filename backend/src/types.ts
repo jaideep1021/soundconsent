@@ -87,7 +87,7 @@ export interface AiProvider {
   embed(text: string): Promise<number[]>;
   transcribeAudio(audio: Buffer, mimeType: string): Promise<string>;
   createGuide(section: ConsentSection, rephrase?: boolean): Promise<SectionGuide>;
-  grade(section: ConsentSection, response: string): Promise<boolean>;
+  grade(section: ConsentSection, response: string, question: string): Promise<boolean>;
   answerQuestion(question: string, sections: ConsentSection[]): Promise<GroundedAnswer>;
   verifyAnswer(question: string, answer: GroundedAnswer, sections: ConsentSection[]): Promise<boolean>;
 }
