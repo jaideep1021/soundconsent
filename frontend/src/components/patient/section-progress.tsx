@@ -55,7 +55,7 @@ export const SectionProgress: React.FC<SectionProgressProps> = ({
           return (
             <div
               key={section.id}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap border transition-colors ${
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap border ${
                 isActive
                   ? "border-charcoal bg-charcoal text-off-white"
                   : isCompleted

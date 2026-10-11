@@ -14,6 +14,7 @@ const AGENT_PROMPT = [
   "You are not a clinician, cannot give medical advice, and cannot obtain or record consent.",
   "For every question about the study, call answer_consent_question and base your reply only on its answer.",
   "For every response to a teach-back question, call submit_teach_back and speak only the returned message.",
+  "Start with review revision {{session_revision}}. For every tool call supply expectedRevision as that revision string and a new requestId of at least 8 letters/digits. Reuse the same requestId when retrying that call. After success use the returned revision for the next call. On a conflict stop and ask the participant to refresh the review and restart voice. Never retry a conflict using a new revision or new requestId.",
   "Never invent facts, interpret medical details, decide whether the participant should join, or claim a response passed unless the tool says so.",
   "For emergencies, follow the tool's immediate safety instructions. If a question is unsupported, tell the participant to ask their doctor.",
   "A human study team member must conduct the final consent discussion. The participant may ask for a human at any time.",
@@ -204,9 +205,12 @@ function createAnswerTool(baseUrl: string, secret: string): ToolConfig {
       request_headers: { authorization: `Bearer ${secret}` },
       request_body_schema: {
         type: "object",
-        required: ["sessionId", "question"],
+        required: ["sessionId", "sessionAccess", "question", "requestId", "expectedRevision"],
         properties: {
           sessionId: { type: "string", dynamic_variable: "session_id" },
+          requestId: { type: "string", description: "Unique ID for this participant turn, at least 8 letters/digits. Reuse exactly on retries." },
+          expectedRevision: { type: "string", description: "Last returned review revision, initially session_revision. Stop on conflict." },
+          sessionAccess: { type: "string", dynamic_variable: "session_access" },
           question: { type: "string", description: "The participant's question, exactly as spoken." },
         },
       },
@@ -227,9 +231,12 @@ function createResponseTool(baseUrl: string, secret: string): ToolConfig {
       request_headers: { authorization: `Bearer ${secret}` },
       request_body_schema: {
         type: "object",
-        required: ["sessionId", "response"],
+        required: ["sessionId", "sessionAccess", "response", "requestId", "expectedRevision"],
         properties: {
           sessionId: { type: "string", dynamic_variable: "session_id" },
+          requestId: { type: "string", description: "Unique ID for this participant turn, at least 8 letters/digits. Reuse exactly on retries." },
+          expectedRevision: { type: "string", description: "Last returned review revision, initially session_revision. Stop on conflict." },
+          sessionAccess: { type: "string", dynamic_variable: "session_access" },
           response: { type: "string", description: "The participant's teach-back response, exactly as spoken." },
         },
       },

@@ -4,9 +4,10 @@ import type { Message } from "@/types/session";
 
 interface ChatBubbleProps {
   message: Message;
+  assistantLabel?: string;
 }
 
-export const ChatBubble: React.FC<ChatBubbleProps> = ({ message }) => {
+export const ChatBubble: React.FC<ChatBubbleProps> = ({ message, assistantLabel = "AI Assistant" }) => {
   const isAi = message.role === "ai";
 
   return (
@@ -35,7 +36,7 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({ message }) => {
             className={`flex items-center gap-2 ${isAi ? "justify-start" : "justify-end"}`}
           >
             <span className="text-xs font-medium text-charcoal">
-              {isAi ? "AI Assistant (Demo)" : "You"}
+              {isAi ? assistantLabel : "You"}
             </span>
             <span className="text-[10px] text-muted-foreground">
               {new Date(message.timestamp).toLocaleTimeString([], {

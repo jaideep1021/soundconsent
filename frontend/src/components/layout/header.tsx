@@ -1,66 +1,25 @@
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuGroup,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { User, LogOut } from "lucide-react";
-import { useAuthStore } from "@/stores/auth-store";
-import { useNavigate } from "react-router";
-
+import { useState } from "react";
+import { Link, useNavigate } from "react-router";
+import { LogOut } from "lucide-react";
+import { useCoordinator } from "@/hooks/use-coordinator";
+import { backendApi } from "@/lib/backend-api";
+import { apiError } from "@/lib/api-client";
+import { queryClient } from "@/lib/query-client";
+import { Button } from "@/components/ui/button";
 export function Header() {
+  const account = useCoordinator();
   const navigate = useNavigate();
-
-  const handleLogout = () => {
-    useAuthStore.getState().logout();
-    navigate("/login");
-  };
-
-  return (
-    <header
-      data-dashboard-header
-      className="h-16 border-b border-border bg-cream flex items-center justify-between px-6 shrink-0"
-    >
-      <div className="flex-1">
-        {/* Optional: Add breadcrumbs or page title here later */}
-      </div>
-      <div className="flex items-center gap-4">
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            aria-label="Account menu"
-            className="inline-flex items-center justify-center whitespace-nowrap text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:text-accent-foreground rounded-full w-11 h-11 bg-charcoal/[0.04]"
-          >
-            <User className="w-4 h-4 text-charcoal" />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="end"
-            className="w-56 bg-cream border-border"
-          >
-            <DropdownMenuGroup>
-              <DropdownMenuLabel className="font-[600] text-charcoal">
-                My Account
-              </DropdownMenuLabel>
-              <DropdownMenuSeparator className="bg-border" />
-              <DropdownMenuItem
-                onClick={() => navigate("/dashboard/settings")}
-                className="text-charcoal focus:bg-charcoal/[0.04]"
-              >
-                Profile Settings
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={handleLogout}
-                className="text-red-600 focus:bg-red-50 dark:focus:bg-red-950"
-              >
-                <LogOut className="w-4 h-4 mr-2" />
-                Log out
-              </DropdownMenuItem>
-            </DropdownMenuGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-    </header>
-  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  return <header data-dashboard-header className="border-b border-border bg-cream px-4 sm:px-6 py-3 shrink-0">
+    <div className="flex items-center justify-between gap-4 min-h-11">
+      <Link to="/dashboard/settings" className="min-w-0 text-sm underline truncate" aria-label="Account settings">{account.data?.name}</Link>
+      <Button variant="outline" className="ml-auto shrink-0" disabled={busy} onClick={async () => {
+        if (busy) return; setBusy(true); setError("");
+        try { await backendApi.logout(); queryClient.clear(); queryClient.setQueryData(["auth"], null); navigate("/login", { replace: true }); }
+        catch (e) { setError(apiError(e)); } finally { setBusy(false); }
+      }}><LogOut className="size-4" />Sign out</Button>
+    </div>
+    {error && <p role="alert" className="text-destructive">{error}</p>}
+  </header>;
 }

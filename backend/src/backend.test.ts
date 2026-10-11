@@ -193,6 +193,7 @@ test("ElevenLabs provisions a Gemini-backed conversational agent with protected 
       auditFile: join(data.directory, "audit.jsonl"),
       approvedVersions: {},
       coordinatorApiKey: "coordinator-secret",
+      allowLegacyApiKey: true,
       corsOrigins: [],
       geminiApiKey: "gemini-test-key",
       geminiModel: "gemini-2.5-flash",
@@ -259,6 +260,7 @@ test("ElevenLabs API errors include validation details without exposing configur
       auditFile: join(data.directory, "audit.jsonl"),
       approvedVersions: {},
       coordinatorApiKey: "coordinator-secret",
+      allowLegacyApiKey: true,
       corsOrigins: [],
       geminiApiKey: "",
       geminiModel: "gemini-2.5-flash",
@@ -416,6 +418,7 @@ test("HTTP API health, coordinator auth, and patient response validation", async
     auditFile: join(data.directory, "audit.jsonl"),
     approvedVersions: { "demo-study": ["1.0"], "fixture-study": ["10"] },
     coordinatorApiKey: "coordinator-secret",
+      allowLegacyApiKey: true,
     corsOrigins: ["http://localhost:5173"],
     geminiApiKey: "",
     geminiModel: "test",
@@ -478,6 +481,7 @@ test("HTTP API health, coordinator auth, and patient response validation", async
     const invalid = await app.inject({
       method: "POST",
       url: `/sessions/${sessionId}/responses`,
+      headers: { authorization: "Bearer coordinator-secret" },
       payload: { response: "" },
     });
     assert.equal(invalid.statusCode, 400);
@@ -496,11 +500,13 @@ test("HTTP API health, coordinator auth, and patient response validation", async
       payload: { sessionId, question: "How often are visits?" },
     });
     assert.equal(unauthenticatedTool.statusCode, 401);
+    const access = await app.inject({ method: "GET", url: `/sessions/${sessionId}/conversation-url`, headers: { authorization: "Bearer coordinator-secret" } });
+    const sessionAccess = access.json().dynamicVariables.session_access;
     const agentQuestion = await app.inject({
       method: "POST",
       url: "/elevenlabs/tools/questions",
       headers: { authorization: `Bearer ${config.elevenLabsToolApiKey}` },
-      payload: { sessionId, question: "How often are visits?" },
+      payload: { sessionId, sessionAccess, requestId: "voice-question-1", expectedRevision: "0", question: "How often are visits?" },
     });
     assert.equal(agentQuestion.statusCode, 200);
     assert.equal(agentQuestion.json().answer, "The form says visits happen monthly.");
@@ -508,13 +514,14 @@ test("HTTP API health, coordinator auth, and patient response validation", async
       method: "POST",
       url: "/elevenlabs/tools/responses",
       headers: { authorization: `Bearer ${config.elevenLabsToolApiKey}` },
-      payload: { sessionId, response: "Visits happen monthly." },
+      payload: { sessionId, sessionAccess, requestId: "voice-response-1", expectedRevision: "1", response: "Visits happen monthly." },
     });
     assert.equal(agentTeachBack.statusCode, 200);
     assert.equal(agentTeachBack.json().sessionId, sessionId);
     const conversationUrl = await app.inject({
       method: "GET",
       url: `/sessions/${sessionId}/conversation-url`,
+      headers: { authorization: "Bearer coordinator-secret" },
     });
     assert.equal(conversationUrl.statusCode, 200);
     assert.equal(conversationUrl.json().signedUrl, "wss://api.elevenlabs.io/v1/convai/conversation?token=test");

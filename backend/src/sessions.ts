@@ -1,9 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { HttpError } from "./errors.js";
 import { redactPii } from "./privacy.js";
 import type { AuditLog } from "./audit.js";
 import { JsonStore } from "./store.js";
-import type { AiProvider, ConsentDocument, ReviewSession } from "./types.js";
+import type { AiProvider, ConsentDocument, ReviewSession, MutationOptions } from "./types.js";
 import { retrieveRelevant } from "./retrieval.js";
 
 export const HUMAN_HANDOFF = "I am an automated assistant, not a doctor. I can help explain this consent form, but I cannot provide medical advice or take your consent. A doctor or nurse will answer medical questions and discuss your final decision. You may ask for a human at any time.";
@@ -18,7 +18,16 @@ export class SessionService {
     private readonly ai: AiProvider,
   ) {}
 
-  async start(document: ConsentDocument): Promise<{ session: ReviewSession; message: string; section: unknown }> {
+  async start(document: ConsentDocument, creationKey?: string): Promise<{ session: ReviewSession; message: string; section: unknown }> {
+    return this.withSessionLock("creation", async () => {
+    if (creationKey) {
+      const prior = this.store.listSessions().find((s) => s.creationKey === creationKey);
+      if (prior) {
+        if (prior.documentId !== document.id) throw new HttpError(409, "Request key already used for another document");
+        return { session: prior, message: prior.lastAssistantMessage, section: this.sectionProgress(prior, prior.documentSnapshot ?? document) };
+      }
+    }
+    if (document.lifecycle === "draft" || document.lifecycle === "archived") throw new HttpError(409, "Only published documents can start reviews");
     const session: ReviewSession = {
       id: randomUUID(),
       documentId: document.id,
@@ -32,33 +41,39 @@ export class SessionService {
       results: [],
       outOfScopeQuestions: [],
       lastAssistantMessage: "",
+      documentSnapshot: structuredClone(document),
+      transcript: [], revision: 0, maxAttempts: this.store.settings(document.studyId).maxAttempts, followUpDays: this.store.settings(document.studyId).reminderDays,
+      ...(creationKey ? { creationKey } : {}),
     };
     const guide = await this.currentGuide(session, document);
     const message = `${HUMAN_HANDOFF}\n\n${guide.summary}\n\n${guide.question}`;
     session.lastAssistantMessage = message;
+    session.guide = guide;
+    this.record(session, "ai", message);
     await this.audit.append("session.started", { documentId: document.id, studyId: document.studyId, version: document.version }, session.id);
     await this.store.saveSession(session);
     await this.audit.append("assistant.guide", { section: document.sections[0]?.title, message }, session.id);
     return { session, message, section: this.sectionProgress(session, document) };
+    });
   }
 
-  async respond(sessionId: string, rawResponse: string): Promise<Record<string, unknown>> {
-    return this.withSessionLock(sessionId, () => this.respondLocked(sessionId, rawResponse));
+  async respond(sessionId: string, rawResponse: string, options: MutationOptions = {}): Promise<Record<string, unknown>> {
+    return this.mutate(sessionId, "response:" + rawResponse, options, (session) => this.respondLocked(session, rawResponse));
   }
 
-  private async respondLocked(sessionId: string, rawResponse: string): Promise<Record<string, unknown>> {
-    const session = this.getSession(sessionId);
+  private async respondLocked(session: ReviewSession, rawResponse: string): Promise<Record<string, unknown>> {
     if (session.status === "completed") throw new HttpError(409, "Session is already complete");
     const response = redactPii(rawResponse.trim());
     if (!response || response.length > 5000) throw new HttpError(400, "Response must be between 1 and 5000 characters");
-    const document = this.getDocument(session.documentId);
+    const document = session.documentSnapshot ?? this.getDocument(session.documentId);
     if (isEmergency(response)) {
       const message = "If this is an emergency, call 911 now. Please ask your doctor about medical concerns.";
       session.outOfScopeQuestions.push({ question: response, askedAt: new Date().toISOString() });
       session.updatedAt = new Date().toISOString();
       session.lastAssistantMessage = message;
+      this.record(session, "patient", response);
+      this.record(session, "ai", message);
       await this.audit.append("question.emergency_escalated", { question: response, response: message }, session.id);
-      await this.store.saveSession(session);
       return {
         sessionId: session.id,
         status: session.status,
@@ -73,8 +88,9 @@ export class SessionService {
       session.outOfScopeQuestions.push({ question: response, askedAt: new Date().toISOString() });
       session.updatedAt = new Date().toISOString();
       session.lastAssistantMessage = message;
+      this.record(session, "patient", response);
+      this.record(session, "ai", message);
       await this.audit.append("question.human_handoff", { question: response, response: message }, session.id);
-      await this.store.saveSession(session);
       return {
         sessionId: session.id,
         status: session.status,
@@ -87,23 +103,26 @@ export class SessionService {
     if (!section) throw new HttpError(500, "Current section is missing");
     const passed = await this.ai.grade(section, response);
     const attempts = session.attemptsForCurrentSection + 1;
-    const result = { sectionId: section.id, sectionTitle: section.title, passed, attempts, response };
+    const result = { sectionId: section.id, sectionTitle: section.title, passed, attempts, response, finalizedAt: new Date().toISOString() };
     let message: string;
     let nextSectionIndex: number | undefined;
     let completed = false;
-    if (!passed && attempts < 2) {
+    if (!passed && attempts < (session.maxAttempts ?? 2)) {
       const guide = await this.currentGuide(session, document, true);
+      session.guide = guide;
       message = `Let's review this section another way.\n\n${guide.summary}\n\n${guide.question}`;
     } else {
       nextSectionIndex = session.sectionIndex + 1;
       completed = nextSectionIndex >= document.sections.length;
       let nextMessage: string;
       if (completed) {
+        session.guide = null;
         nextMessage = "You have finished reviewing this form. Please discuss your questions and final decision with the clinical team. This review does not record your consent.";
       } else {
         const nextSection = document.sections[nextSectionIndex];
         if (!nextSection) throw new HttpError(500, "Next section is missing");
         const nextGuide = await this.ai.createGuide(nextSection);
+        session.guide = nextGuide;
         nextMessage = `${nextGuide.summary}\n\n${nextGuide.question}`;
       }
       message = passed
@@ -112,27 +131,29 @@ export class SessionService {
     }
 
     session.attemptsForCurrentSection = nextSectionIndex === undefined ? attempts : 0;
-    if (passed || attempts >= 2) session.results.push(result);
+    if (passed || attempts >= (session.maxAttempts ?? 2)) session.results.push(result);
     if (nextSectionIndex !== undefined) session.sectionIndex = nextSectionIndex;
-    if (completed) session.status = "completed";
+    if (completed) { session.status = "completed"; session.completedAt = new Date().toISOString(); }
     session.updatedAt = new Date().toISOString();
     session.lastAssistantMessage = message;
+    this.record(session, "patient", response, section.id);
+    this.record(session, "ai", message);
     await this.audit.append("teachback.graded", { sectionId: section.id, sectionTitle: section.title, passed, attempts, response }, session.id);
-    if (!passed && attempts >= 2) {
+    if (!passed && attempts >= (session.maxAttempts ?? 2)) {
       await this.audit.append("teachback.flagged", { sectionId: section.id, sectionTitle: section.title, attempts }, session.id);
     }
     if (completed) await this.audit.append("session.completed", { report: this.reportFor(session) }, session.id);
-    await this.store.saveSession(session);
     await this.audit.append("assistant.response", { message }, session.id);
     return { sessionId: session.id, status: session.status, message, section: this.sectionProgress(session, document) };
   }
 
-  async ask(sessionId: string, rawQuestion: string): Promise<Record<string, unknown>> {
-    return this.withSessionLock(sessionId, () => this.askLocked(sessionId, rawQuestion));
+  async ask(sessionId: string, rawQuestion: string, options: MutationOptions = {}): Promise<Record<string, unknown>> {
+    return this.mutate(sessionId, "question:" + rawQuestion, options, (session) => this.askLocked(session, rawQuestion));
   }
 
-  private async askLocked(sessionId: string, rawQuestion: string): Promise<Record<string, unknown>> {
-    const session = this.getSession(sessionId);
+  private async askLocked(session: ReviewSession, rawQuestion: string): Promise<Record<string, unknown>> {
+    const sessionId = session.id;
+    if (session.status === "completed") throw new HttpError(409, "Session is already complete");
     const question = redactPii(rawQuestion.trim());
     if (!question || question.length > 2000) throw new HttpError(400, "Question must be between 1 and 2000 characters");
     if (isEmergency(question)) {
@@ -140,8 +161,9 @@ export class SessionService {
       session.outOfScopeQuestions.push({ question, askedAt: new Date().toISOString() });
       session.updatedAt = new Date().toISOString();
       session.lastAssistantMessage = answer;
+      this.record(session, "patient", question);
+      this.record(session, "ai", answer);
       await this.audit.append("question.emergency_escalated", { question, response: answer }, session.id);
-      await this.store.saveSession(session);
       return { sessionId, answer, citations: [], requiresClinician: true, emergency: true };
     }
     if (isHumanRequest(question)) {
@@ -149,11 +171,12 @@ export class SessionService {
       session.outOfScopeQuestions.push({ question, askedAt: new Date().toISOString() });
       session.updatedAt = new Date().toISOString();
       session.lastAssistantMessage = answer;
+      this.record(session, "patient", question);
+      this.record(session, "ai", answer);
       await this.audit.append("question.human_handoff", { question, response: answer }, session.id);
-      await this.store.saveSession(session);
       return { sessionId, answer, citations: [], requiresClinician: true };
     }
-    const document = this.getDocument(session.documentId);
+    const document = session.documentSnapshot ?? this.getDocument(session.documentId);
     const relevant = await retrieveRelevant(this.ai, question, document.sections);
     const grounded = relevant.length ? await this.ai.answerQuestion(question, relevant) : null;
     const safe = grounded && !grounded.requiresClinician
@@ -167,8 +190,85 @@ export class SessionService {
     }
     session.updatedAt = new Date().toISOString();
     session.lastAssistantMessage = safe.answer;
-    await this.store.saveSession(session);
+    this.record(session, "patient", question);
+    this.record(session, "ai", safe.answer, undefined, safe.citations);
     return { sessionId, answer: safe.answer, citations: safe.citations, requiresClinician: safe.requiresClinician };
+  }
+
+  async read(sessionId: string): Promise<Record<string, unknown>> {
+    return this.withSessionLock(sessionId, async () => {
+      const session = this.getSession(sessionId);
+      const document = session.documentSnapshot ?? this.getDocument(session.documentId);
+      return {
+        sessionId: session.id, documentId: document.id, documentTitle: document.title,
+        studyId: session.studyId, documentVersion: session.documentVersion,
+        status: session.status, startedAt: session.startedAt, updatedAt: session.updatedAt,
+        completedAt: session.completedAt ?? (session.status === "completed" ? session.updatedAt : null),
+        message: session.lastAssistantMessage, disclosure: HUMAN_HANDOFF,
+        section: this.sectionProgress(session, document),
+        revision: session.revision ?? 0, maxAttempts: session.maxAttempts ?? 2, acknowledgment: session.acknowledgment ?? null,
+        attemptsForCurrentSection: session.attemptsForCurrentSection,
+        guide: session.guide ?? null,
+        transcript: session.transcript ?? [], historyAvailable: session.transcript !== undefined && !session.historyIncomplete,
+        sections: document.sections.map(({ id, title, text }, index) => ({
+          id, title, text,
+          status: index < session.sectionIndex ? (session.results.find((r) => r.sectionId === id)?.passed ? "completed" : "needs-review") : index === session.sectionIndex ? "active" : "pending",
+        })),
+        results: session.results, outOfScopeQuestions: session.outOfScopeQuestions,
+        humanHandoffRequired: true, consentObtained: false,
+      };
+    });
+  }
+
+  async audio(sessionId: string, bytes: Buffer, mime: string, options: MutationOptions = {}) {
+    if (!bytes.length || bytes.length > 10 * 1024 * 1024) throw new HttpError(413, "Audio must be between 1 byte and 10 MiB");
+    if (!/^audio\/(?:aac|flac|mp3|m4a|mpeg|mpga|ogg|opus|wav|webm)$/i.test(mime)) throw new HttpError(415, "Audio format is not supported");
+    const fingerprint = "audio:" + mime + ":" + createHash("sha256").update(bytes).digest("hex");
+    return this.mutate(sessionId, fingerprint, options, async (session) => {
+      if (session.status === "completed") throw new HttpError(409, "Session is already complete");
+      const transcript = await this.ai.transcribeAudio(bytes, mime);
+      await this.audit.append("voice.transcribed", { transcript: redactPii(transcript) }, sessionId);
+      return this.respondLocked(session, transcript);
+    });
+  }
+
+  async acknowledge(sessionId: string, actor: "patient" | "coordinator", options: MutationOptions = {}) {
+    return this.mutate(sessionId, "acknowledgment:" + actor, options, async (session) => {
+      if (session.status !== "completed") throw new HttpError(409, "Complete the review before acknowledging it");
+      if (!session.acknowledgment) {
+        session.acknowledgment = { text: REVIEW_ACKNOWLEDGMENT, acknowledgedAt: new Date().toISOString(), actor, documentVersion: session.documentVersion };
+        await this.audit.append("review.acknowledged", session.acknowledgment, sessionId);
+      }
+      return { acknowledgment: session.acknowledgment, consentObtained: false };
+    });
+  }
+
+  private async mutate(sessionId: string, payload: string, options: MutationOptions, action: (session: ReviewSession) => Promise<Record<string, unknown>>) {
+    return this.withSessionLock(sessionId, async () => {
+      const session = this.getSession(sessionId);
+      const fingerprint = createHash("sha256").update(payload).digest("hex");
+      const receipt = options.key ? session.receipts?.["request:" + options.key] : undefined;
+      if (receipt) {
+        if (receipt.fingerprint !== fingerprint) throw new HttpError(409, "Request key already used for different content");
+        return receipt.result;
+      }
+      if (options.revision !== undefined && options.revision !== (session.revision ?? 0)) throw new HttpError(409, "Review changed; refresh before submitting again");
+      const result = await action(session);
+      session.revision = (session.revision ?? 0) + 1;
+      session.updatedAt = new Date().toISOString();
+      result.revision = session.revision;
+      if (options.key) { session.receipts ??= {}; session.receipts["request:" + options.key] = { fingerprint, result }; }
+      await this.store.saveSession(session);
+      return result;
+    });
+  }
+
+  private record(session: ReviewSession, role: "ai" | "patient", content: string, sectionId?: string, citations?: string[]) {
+    const document = session.documentSnapshot ?? this.getDocument(session.documentId);
+    const id = sectionId ?? document.sections[session.sectionIndex]?.id;
+    if (session.transcript === undefined) session.historyIncomplete = true;
+    session.transcript ??= [];
+    session.transcript.push({ id: randomUUID(), role, content: redactPii(content), timestamp: new Date().toISOString(), ...(id ? { sectionId: id } : {}), ...(citations ? { citations } : {}) });
   }
 
   report(sessionId: string): Record<string, unknown> {
@@ -182,15 +282,19 @@ export class SessionService {
       studyId: session.studyId,
       documentVersion: session.documentVersion,
       startedAt: session.startedAt,
-      completedAt: session.status === "completed" ? session.updatedAt : null,
+      completedAt: session.status === "completed" ? session.completedAt ?? session.updatedAt : null,
       status: session.status,
       sections: session.results.map((result) => ({
+        sectionId: result.sectionId,
         title: result.sectionTitle,
         outcome: result.passed ? "passed" : "needs_human_follow_up",
         attempts: result.attempts,
         response: result.response,
       })),
       outOfScopeQuestions: session.outOfScopeQuestions,
+      acknowledgment: session.acknowledgment ?? null,
+      manualFlags: this.store.manualFlags(session.id),
+      followUps: this.store.followUps(session.id),
       humanHandoffRequired: true,
       consentObtained: false,
     };
@@ -243,3 +347,5 @@ function isEmergency(question: string): boolean {
 function isHumanRequest(question: string): boolean {
   return /\b(?:speak|talk|connect|want|need|please|can i)\b.{0,40}\b(?:human|person|nurse|doctor|coordinator)\b|\b(?:human|person|nurse|doctor|coordinator)\b.{0,40}\b(?:speak|talk|connect|please)\b/i.test(question);
 }
+
+export const REVIEW_ACKNOWLEDGMENT = "I acknowledge that I reviewed this form with an automated assistant. This records review completion only. It is not consent to participate. My questions and final decision must be discussed with the clinical team.";

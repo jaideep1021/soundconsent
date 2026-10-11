@@ -1,67 +1,15 @@
-import { useState } from "react";
-import { useSessionStore } from "@/stores/session-store";
-import { ConsentSignature } from "@/components/patient/consent-signature";
+import { Navigate } from "react-router";
 import { CheckCircle2, AlertTriangle } from "lucide-react";
+import { usePatientSession } from "@/hooks/patient-session";
+import { ReviewAcknowledgment } from "@/components/patient/review-acknowledgment";
 export default function SessionSummaryPage() {
-  const { session, completeSession } = useSessionStore();
-  const [error, setError] = useState("");
-  if (!session) return null;
-  if (session.status === "completed")
-    return (
-      <div className="py-12 space-y-6 text-center">
-        <CheckCircle2 className="w-12 h-12 mx-auto" />
-        <h1 className="text-4xl font-semibold">Thank You</h1>
-        <p>
-          Your demo signature for {session.procedureName} was saved in this
-          browser tab. Nothing was submitted to your care team.
-        </p>
-        <p className="text-sm text-muted-foreground">
-          Signed by {session.signature?.name} ·{" "}
-          {session.signature &&
-            new Date(session.signature.signedAt).toLocaleString()}
-        </p>
-      </div>
-    );
-  return (
-    <div className="space-y-8 pb-10">
-      <h1 className="text-4xl font-semibold">Review & Consent</h1>
-      <p className="text-muted-foreground">
-        Review your recorded responses for {session.procedureName}. This demo
-        does not assess understanding or record clinical consent.
-      </p>
-      {session.sections.map((section) => (
-        <div key={section.id} className="border rounded-xl p-5 space-y-2">
-          <h2 className="font-semibold flex items-center gap-2">
-            <AlertTriangle className="w-5 h-5" />
-            {section.title}
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            {section.aiAssessment ||
-              "Not evaluated. Discuss this section with your care team."}
-          </p>
-          <p className="whitespace-pre-wrap">
-            {section.patientResponse || "No response recorded."}
-          </p>
-        </div>
-      ))}
-      <p className="text-muted-foreground">
-        Unanswered questions remain for your care team. A demo signature does
-        not clear items needing review.
-      </p>
-      {error && (
-        <p role="alert" className="text-destructive">
-          {error}
-        </p>
-      )}
-      <ConsentSignature
-        patientName={session.patientName}
-        onConsent={(signature) => {
-          if (!completeSession(signature))
-            setError(
-              "Please complete each section and check your signature before submitting.",
-            );
-        }}
-      />
-    </div>
-  );
+  const { snapshot, refresh, onAccessDenied, setBusy } = usePatientSession();
+  if (snapshot.status !== "completed") return <Navigate to={`/session/${snapshot.sessionId}/chat`} replace />;
+  return <div className="space-y-8 pb-10">
+    <div className="space-y-3"><CheckCircle2 className="size-10" /><h1 className="text-4xl font-semibold">Review completed</h1><p>{snapshot.documentTitle} · Version {snapshot.documentVersion}</p></div>
+    <p className="text-muted-foreground">Discuss your questions and final decision with the clinical team. This review does not record consent to participate.</p>
+    {snapshot.results.map((r) => <section key={r.sectionId} className="border rounded-xl p-5 space-y-2"><h2 className="font-semibold flex items-center gap-2">{!r.passed && <AlertTriangle className="size-5" />}{r.sectionTitle}</h2><p>{r.passed ? "Teach-back passed" : "Needs clinical follow-up"}</p><p className="whitespace-pre-wrap">{r.response}</p></section>)}
+    {snapshot.outOfScopeQuestions.length > 0 && <section className="space-y-3"><h2 className="text-xl font-semibold">Questions for your clinical team</h2><ul className="list-disc pl-5">{snapshot.outOfScopeQuestions.map((q, i) => <li key={i}>{q.question}</li>)}</ul></section>}
+    <ReviewAcknowledgment snapshot={snapshot} participant={snapshot.accessRole === "patient"} onSaved={refresh} onAccessDenied={onAccessDenied} onBusyChange={setBusy} />
+  </div>;
 }

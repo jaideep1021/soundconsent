@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { PDFParse } from "pdf-parse";
 import { HttpError } from "./errors.js";
 import { extractDocumentVersion, extractTitle, splitIntoSections } from "./sections.js";
@@ -14,6 +15,50 @@ export class DocumentService {
     private readonly ai: AiProvider,
     private readonly approvedVersions: Record<string, string[]>,
   ) {}
+
+  async draft(source: ConsentDocument, input: Record<string, unknown>, accountId: string) {
+    const version = input.version;
+    if (typeof version !== "string" || !/^[A-Za-z0-9._-]{1,50}$/.test(version) || version === source.version) throw new HttpError(400, "Choose a different version (letters, digits, dots, underscores or hyphens)");
+    const draft = await this.store.saveDocument({ studyId: source.studyId, version, title: source.title, pageCount: source.pageCount,
+      sections: source.sections.map((s) => ({ ...s, id: randomUUID(), embedding: [] })), uploadedAt: new Date().toISOString(), parentId: source.id, lifecycle: "draft", revision: 0 });
+    await this.audit.append("document.drafted", { documentId: draft.id, parentId: source.id, accountId });
+    return draft;
+  }
+
+  async edit(document: ConsentDocument, input: Record<string, unknown>, accountId: string) {
+    if (document.lifecycle !== "draft") throw new HttpError(409, "Only drafts can be edited; create a new version first");
+    if (!Number.isInteger(input.revision) || input.revision !== (document.revision ?? 0)) throw new HttpError(409, "Document changed; refresh and retry");
+    if (typeof input.title !== "string" || !input.title.trim() || input.title.length > 300 || !Array.isArray(input.sections) || !input.sections.length || input.sections.length > 100) throw new HttpError(400, "Provide a title and 1–100 sections");
+    let total = 0;
+    const sections = input.sections.map((raw: unknown) => {
+      if (!raw || typeof raw !== "object") throw new HttpError(400, "Invalid section");
+      const s = raw as Record<string, unknown>;
+      if (typeof s.title !== "string" || !s.title.trim() || s.title.length > 300 || typeof s.text !== "string" || !s.text.trim() || s.text.length > 50000) throw new HttpError(400, "Each section needs a title and text (maximum 50,000 characters)");
+      total += s.text.length;
+      return { id: randomUUID(), title: s.title.trim(), text: s.text.trim(), embedding: [] as number[] };
+    });
+    if (total > 500000) throw new HttpError(413, "Document text is too large");
+    await this.store.updateDocument({ ...document, title: input.title.trim(), sections }, Number(input.revision));
+    await this.audit.append("document.edited", { documentId: document.id, accountId });
+    return this.store.getDocument(document.id)!;
+  }
+
+  async publish(document: ConsentDocument, revision: unknown, accountId: string) {
+    if (document.lifecycle !== "draft") throw new HttpError(409, "Only drafts can be published");
+    if (!Number.isInteger(revision) || revision !== (document.revision ?? 0)) throw new HttpError(409, "Document changed; refresh and retry");
+    if (!(this.approvedVersions[document.studyId] ?? []).includes(document.version)) throw new HttpError(409, "Version must be approved in the server approved-versions configuration before publication");
+    const sections = await mapWithConcurrency(document.sections, 4, async (section) => ({ ...section, embedding: await this.ai.embed(section.text) }));
+    await this.store.updateDocument({ ...document, sections, lifecycle: "published", approvedBy: accountId, approvedAt: new Date().toISOString() }, Number(revision));
+    await this.audit.append("document.published", { documentId: document.id, version: document.version, accountId });
+    return this.store.getDocument(document.id)!;
+  }
+
+  async archive(document: ConsentDocument, revision: unknown, accountId: string) {
+    if (!Number.isInteger(revision) || revision !== (document.revision ?? 0)) throw new HttpError(409, "Document changed; refresh and retry");
+    await this.store.updateDocument({ ...document, lifecycle: "archived" }, Number(revision));
+    await this.audit.append("document.archived", { documentId: document.id, accountId });
+    return this.store.getDocument(document.id)!;
+  }
 
   async ingest(input: {
     bytes: Buffer;
@@ -54,7 +99,7 @@ export class DocumentService {
         title: extractTitle(text, input.filename.replace(/\.pdf$/i, "")),
         pageCount: info.total,
         uploadedAt: new Date().toISOString(),
-        sections,
+        sections, lifecycle: "published", revision: 0,
       });
       await this.audit.append("document.uploaded", {
         documentId: document.id,

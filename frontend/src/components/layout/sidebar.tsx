@@ -1,4 +1,5 @@
-import { NavLink } from "react-router";
+import { useCoordinator } from "@/hooks/use-coordinator";
+import { NavLink, Link } from "react-router";
 import { Home, FileText, Users, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -10,12 +11,13 @@ const navItems = [
 ];
 
 export function Sidebar() {
+  const { data: account } = useCoordinator();
   return (
     <aside className="w-full md:w-64 shrink-0 border-r border-border bg-cream flex flex-col md:h-full overflow-y-auto">
       <div className="hidden md:flex h-16 items-center px-6 border-b border-border">
-        <span className="font-[600] text-charcoal text-xl tracking-tight">
+        <Link to="/" className="font-[600] text-charcoal text-xl tracking-tight">
           Teach-It-Back
-        </span>
+        </Link>
       </div>
       <nav className="grid grid-cols-4 md:block md:flex-1 px-2 md:px-4 py-2 md:py-6 md:space-y-2">
         {navItems.map((item) => (
@@ -40,13 +42,13 @@ export function Sidebar() {
       <div className="hidden md:block p-4 border-t border-border">
         <div className="flex items-center gap-3 px-2">
           <div className="w-8 h-8 rounded-full bg-charcoal text-off-white flex items-center justify-center text-sm font-[600]">
-            CC
+            {account?.name.slice(0, 2).toUpperCase()}
           </div>
           <div className="flex flex-col">
             <span className="text-sm font-[600] text-charcoal">
-              Coordinator
+              {account?.name}
             </span>
-            <span className="text-xs text-muted-foreground">Clinic Staff</span>
+            <span className="text-xs text-muted-foreground">{account?.role === "admin" ? "Administrator" : "Study coordinator"}</span>
           </div>
         </div>
       </div>

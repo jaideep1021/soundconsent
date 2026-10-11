@@ -19,10 +19,6 @@ export function DashboardLayout() {
           tabIndex={-1}
           className="flex-1 overflow-y-auto p-4 sm:p-8"
         >
-          <p data-demo-banner className="mb-6 text-sm text-muted-foreground">
-            Frontend demo · Use sample details only. Changes stay in this
-            browser tab.
-          </p>
           <Outlet />
         </main>
       </div>

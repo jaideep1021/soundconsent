@@ -52,10 +52,5 @@ export async function audioResponse(
   bytes: Buffer,
   contentType: string,
 ): Promise<Record<string, unknown>> {
-  const session = store.getSession(sessionId);
-  if (!session) throw new HttpError(404, "Session not found");
-  if (session.status !== "in_progress") throw new HttpError(409, "Session is already complete");
-  const transcript = await ai.transcribeAudio(bytes, contentType);
-  await audit.append("voice.transcribed", { transcript }, sessionId);
-  return sessions.respond(sessionId, transcript);
+  return sessions.audio(sessionId, bytes, contentType);
 }

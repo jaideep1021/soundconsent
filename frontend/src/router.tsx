@@ -1,7 +1,8 @@
 import { Suspense, lazy, type ComponentType } from "react";
 import { createBrowserRouter } from "react-router";
 import { PatientLayout } from "@/components/layout/patient-layout";
-import { ProtectedRoute, SessionRoute } from "@/components/shared/route-guards";
+import { ProtectedRoute } from "@/components/shared/route-guards";
+import { WorkspaceRedirect, PatientRedirect, LoginRedirect } from "@/pages/legacy-redirects";
 import { LoadingSkeleton } from "@/components/shared/loading-skeleton";
 import { ErrorFallback } from "@/components/shared/error-boundary";
 import { NotFound } from "@/components/shared/not-found";
@@ -19,6 +20,10 @@ export const router = createBrowserRouter([
     children: [
       { path: "/", element: page(() => import("@/pages/landing")) },
       { path: "/login", element: page(() => import("@/pages/login")) },
+      { path: "/demo-login", element: <LoginRedirect /> },
+      { path: "/review/:sessionId", element: <PatientRedirect /> },
+      { path: "/patient", element: page(() => import("@/pages/patient-access")) },
+      { path: "/connected", element: <WorkspaceRedirect /> },
       {
         element: <ProtectedRoute />,
         children: [
@@ -76,31 +81,11 @@ export const router = createBrowserRouter([
         path: "/session/:sessionId",
         element: <PatientLayout />,
         children: [
-          {
-            element: <SessionRoute />,
-            children: [
-              {
-                index: true,
-                element: page(() => import("@/pages/session/index")),
-              },
-              {
-                path: "overview",
-                element: page(() => import("@/pages/session/overview")),
-              },
-              {
-                path: "chat",
-                element: page(() => import("@/pages/session/chat")),
-              },
-              {
-                path: "voice",
-                element: page(() => import("@/pages/session/voice")),
-              },
-              {
-                path: "summary",
-                element: page(() => import("@/pages/session/summary")),
-              },
-            ],
-          },
+          { index: true, element: page(() => import("@/pages/session/index")) },
+          { path: "overview", element: page(() => import("@/pages/session/overview")) },
+          { path: "chat", element: page(() => import("@/pages/session/chat")) },
+          { path: "voice", element: page(() => import("@/pages/session/chat")) },
+          { path: "summary", element: page(() => import("@/pages/session/summary")) },
         ],
       },
       { path: "*", element: <NotFound /> },

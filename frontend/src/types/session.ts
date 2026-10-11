@@ -14,18 +14,3 @@ export interface Message {
   timestamp: string;
   sectionId?: string;
 }
-export interface SessionData {
-  id: string;
-  patientName: string;
-  procedureName: string;
-  dateOfBirth: string;
-  sections: Section[];
-  messages: Message[];
-  mode: "chat" | "voice";
-  status: "pending" | "in-progress" | "completed";
-  signature?: { name: string; signedAt: string; acknowledged: true };
-  flagged?: boolean;
-  followUpAt?: string;
-  acknowledgedAt?: string;
-  inquiries?: string[];
-}

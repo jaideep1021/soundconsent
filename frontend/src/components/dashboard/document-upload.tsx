@@ -10,8 +10,15 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { validatePdf } from "@/lib/validators";
-import { useDocumentStore } from "@/stores/document-store";
+import { backendApi } from "@/lib/backend-api";
+import { apiError } from "@/lib/api-client";
+import { queryClient } from "@/lib/query-client";
+import { Input } from "@/components/ui/input";
 export function DocumentUploadModal({ children }: { children: ReactElement }) {
+  const [busy, setBusy] = useState(false);
+  const [studyId, setStudyId] = useState("");
+  const [version, setVersion] = useState("");
+  const submitting = useRef(false);
   const [open, setOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState("");
@@ -35,6 +42,7 @@ export function DocumentUploadModal({ children }: { children: ReactElement }) {
     <Dialog
       open={open}
       onOpenChange={(value) => {
+        if (submitting.current) return;
         setOpen(value);
         setFile(null);
         setError("");
@@ -46,11 +54,13 @@ export function DocumentUploadModal({ children }: { children: ReactElement }) {
         <DialogHeader>
           <DialogTitle>Add ICF Document</DialogTitle>
           <DialogDescription>
-            Select a PDF to create a local draft. File transfer and AI
-            extraction are unavailable in this demo.
+            Upload an approved consent PDF to extract its sections and prepare understanding reviews.
           </DialogDescription>
         </DialogHeader>
+        <label className="block" htmlFor="upload-study">Study ID</label><Input id="upload-study" required pattern="[A-Za-z0-9._-]{1,100}" disabled={busy} value={studyId} onChange={(e) => setStudyId(e.target.value)} />
+        <label className="block" htmlFor="upload-version">Expected version (optional)</label><Input id="upload-version" disabled={busy} value={version} onChange={(e) => setVersion(e.target.value)} />
         <input
+          disabled={busy}
           ref={input}
           type="file"
           accept="application/pdf,.pdf"
@@ -64,6 +74,7 @@ export function DocumentUploadModal({ children }: { children: ReactElement }) {
         />
         <button
           type="button"
+          disabled={busy}
           onClick={() => input.current?.click()}
           onDragOver={(e) => {
             e.preventDefault();
@@ -73,7 +84,7 @@ export function DocumentUploadModal({ children }: { children: ReactElement }) {
           onDrop={(e) => {
             e.preventDefault();
             setDragging(false);
-            select(e.dataTransfer.files);
+            if (!busy) select(e.dataTransfer.files);
           }}
           className={`min-h-40 border-2 border-dashed rounded-xl p-8 focus-visible:ring-2 focus-visible:ring-ring ${dragging ? "border-charcoal bg-muted" : "border-border-interactive"}`}
         >
@@ -81,7 +92,7 @@ export function DocumentUploadModal({ children }: { children: ReactElement }) {
             Choose a PDF or drop it here
           </span>
           <span className="text-sm text-muted-foreground">
-            PDF · Maximum 10 MB
+            PDF · Maximum 20 MiB
           </span>
         </button>
         {error && (
@@ -94,26 +105,18 @@ export function DocumentUploadModal({ children }: { children: ReactElement }) {
             {file.name} · {(file.size / 1024).toFixed(1)} KB
           </p>
         )}
-        <Button
-          disabled={!file}
-          onClick={() => {
-            if (!file) return;
-            const id = crypto.randomUUID();
-            useDocumentStore
-              .getState()
-              .save({
-                id,
-                title: file.name.replace(/\.pdf$/i, ""),
-                source: file.name,
-                status: "Draft",
-                sections: [],
-              });
-            setOpen(false);
-            navigate(`/dashboard/documents/${id}`);
-          }}
-        >
-          Create Local Draft
-        </Button>
+        {busy && <p role="status">Processing document…</p>}
+        <Button disabled={busy || !file || !studyId.trim()} onClick={async () => {
+          if (!file || submitting.current) return;
+          submitting.current = true; setBusy(true); setError("");
+          try {
+            const document = await backendApi.upload(file, studyId, version);
+            await queryClient.invalidateQueries({ queryKey: ["coordinator"] });
+            setOpen(false); setFile(null);
+            navigate(`/dashboard/documents/${encodeURIComponent(document.id)}`);
+          } catch (error) { setError(apiError(error)); }
+          finally { submitting.current = false; setBusy(false); }
+        }}>Upload and process PDF</Button>
       </DialogContent>
     </Dialog>
   );

@@ -26,7 +26,7 @@ export default function LandingPage() {
     <div className="min-h-screen bg-cream text-charcoal flex flex-col font-sans selection:bg-charcoal selection:text-off-white">
       {/* Top Navigation */}
       <header className="sticky top-0 z-50 bg-cream/90 backdrop-blur-md border-b border-border">
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex flex-wrap gap-4 items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-md bg-charcoal flex items-center justify-center text-off-white shadow-[var(--shadow-inset-button)]">
               <ShieldCheck className="w-5 h-5" />
@@ -41,22 +41,22 @@ export default function LandingPage() {
             </div>
           </div>
 
-          <nav className="flex items-center gap-3 sm:gap-6">
+          <nav className="flex flex-wrap items-center gap-3 sm:gap-6">
             <Link
               to="/dashboard"
-              className="text-sm font-medium text-muted-foreground hover:text-charcoal transition-colors hidden md:inline-block"
+              className="text-sm font-medium text-muted-foreground hover:text-charcoal transition-colors"
             >
               Dashboard
             </Link>
             <Link
               to="/dashboard/documents"
-              className="text-sm font-medium text-muted-foreground hover:text-charcoal transition-colors hidden md:inline-block"
+              className="text-sm font-medium text-muted-foreground hover:text-charcoal transition-colors"
             >
               Documents
             </Link>
             <Link
               to="/dashboard/sessions"
-              className="text-sm font-medium text-muted-foreground hover:text-charcoal transition-colors hidden md:inline-block"
+              className="text-sm font-medium text-muted-foreground hover:text-charcoal transition-colors"
             >
               Sessions
             </Link>
@@ -73,7 +73,7 @@ export default function LandingPage() {
               size="sm"
               className="bg-charcoal text-off-white hover:bg-charcoal/90 shadow-[var(--shadow-inset-button)]"
             >
-              <Link to="/session/mock-session-1">Patient Demo</Link>
+              <Link to="/patient">Patient Access</Link>
             </Button>
           </nav>
         </div>
@@ -84,18 +84,16 @@ export default function LandingPage() {
         <section className="pt-16 pb-12 sm:pt-24 sm:pb-20 max-w-5xl mx-auto px-6 text-center">
           <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-cream text-xs font-medium text-muted-foreground mb-8">
             <Sparkles className="w-3.5 h-3.5 text-charcoal" />
-            <span>Autonomous Informed Consent Verification System</span>
+            <span>Guided consent understanding reviews</span>
           </div>
 
           <h1 className="text-4xl sm:text-6xl font-semibold tracking-[-1.5px] leading-[1.08] text-charcoal mb-6 max-w-4xl mx-auto">
-            Transforming Informed Consent into Verified Understanding
+            Understanding Consent, One Conversation at a Time
           </h1>
 
           <p className="text-lg sm:text-xl text-muted-foreground max-w-2xl mx-auto leading-relaxed mb-10 font-normal">
-            Replace passive signature-seeking with an interactive teach-back
-            companion. Engages patients through plain-language dialogue,
-            verifies true comprehension, and alerts clinical coordinators to
-            potential gaps.
+            Review consent documents through plain-language dialogue and teach-back.
+            Keep questions and understanding gaps ready for discussion with your clinical team.
           </p>
 
           <div className="flex flex-wrap items-center justify-center gap-4">
@@ -105,10 +103,10 @@ export default function LandingPage() {
               className="bg-charcoal text-off-white hover:bg-charcoal/90 px-7 h-12 text-base rounded-md shadow-[var(--shadow-inset-button)]"
             >
               <Link
-                to="/session/mock-session-1"
+                to="/patient"
                 className="flex items-center gap-2"
               >
-                Launch Patient Companion <ArrowRight className="w-4 h-4" />
+                Patient invitation help <ArrowRight className="w-4 h-4" />
               </Link>
             </Button>
             <Button
@@ -135,7 +133,7 @@ export default function LandingPage() {
                     </span>
                     <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
                       <span className="w-2 h-2 rounded-full bg-[#22c55e]"></span>
-                      Active Demo
+                      Invitation access
                     </span>
                   </div>
                   <CardTitle className="text-2xl font-semibold text-charcoal tracking-tight">
@@ -144,37 +142,20 @@ export default function LandingPage() {
                   <CardDescription className="text-base text-muted-foreground leading-normal pt-1">
                     Patients review their procedure consent via guided
                     conversation. The AI tests their understanding in plain
-                    language before capturing legal sign-off.
+                    language before a final discussion with their clinical team.
                   </CardDescription>
                 </CardHeader>
 
                 <CardContent className="space-y-4 pt-2">
-                  <div className="p-3.5 rounded-lg border border-border bg-border/30 space-y-1 text-xs">
-                    <div className="font-semibold text-charcoal flex items-center justify-between">
-                      <span>Mock Patient Credentials</span>
-                      <span className="text-[10px] text-muted-foreground">
-                        Pre-loaded for instant access
-                      </span>
-                    </div>
-                    <div className="text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
-                      <span>
-                        <strong>Name:</strong> Jane Doe
-                      </span>
-                      <span>
-                        <strong>DOB:</strong> 1980-05-15
-                      </span>
-                      <span>
-                        <strong>Procedure:</strong> Lumbar Puncture
-                      </span>
-                    </div>
+                  <div className="p-3.5 rounded-lg border border-border bg-border/30 text-sm text-muted-foreground">
+                    Your coordinator provides a private invitation link and a separate access code. Open that link to start or resume your review.
                   </div>
 
                   <ul className="space-y-2.5 text-sm text-charcoal">
                     <li className="flex items-start gap-2.5">
                       <CheckCircle2 className="w-4 h-4 text-charcoal shrink-0 mt-0.5" />
                       <span>
-                        Compliant AI disclosure (strictly introduced as AI, not
-                        a doctor)
+                        Clear AI disclosure and referral to the clinical team
                       </span>
                     </li>
                     <li className="flex items-start gap-2.5">
@@ -194,7 +175,7 @@ export default function LandingPage() {
                     <li className="flex items-start gap-2.5">
                       <ShieldCheck className="w-4 h-4 text-charcoal shrink-0 mt-0.5" />
                       <span>
-                        Digital signature canvas and understanding audit trail
+                        Saved review acknowledgment and understanding history
                       </span>
                     </li>
                   </ul>
@@ -207,35 +188,14 @@ export default function LandingPage() {
                   className="w-full bg-charcoal text-off-white hover:bg-charcoal/90 rounded-md h-11 text-sm shadow-[var(--shadow-inset-button)]"
                 >
                   <Link
-                    to="/session/mock-session-1"
+                    to="/patient"
                     className="flex items-center justify-center gap-2"
                   >
-                    Enter as Patient (Session ID: mock-session-1){" "}
+                    How to open your invitation{" "}
                     <ArrowRight className="w-4 h-4" />
                   </Link>
                 </Button>
-                <div className="flex items-center justify-center gap-4 text-xs text-muted-foreground">
-                  <Link
-                    to="/session/mock-session-1/chat"
-                    className="underline hover:text-charcoal"
-                  >
-                    Direct to Chat
-                  </Link>
-                  <span>•</span>
-                  <Link
-                    to="/session/mock-session-1/voice"
-                    className="underline hover:text-charcoal"
-                  >
-                    Direct to Voice
-                  </Link>
-                  <span>•</span>
-                  <Link
-                    to="/session/mock-session-1/summary"
-                    className="underline hover:text-charcoal"
-                  >
-                    Direct to Summary
-                  </Link>
-                </div>
+                <p className="text-sm text-muted-foreground text-center">Text, voice and your summary are available within your authorized review.</p>
               </div>
             </Card>
 
@@ -263,39 +223,15 @@ export default function LandingPage() {
                 </CardHeader>
 
                 <CardContent className="space-y-4 pt-2">
-                  <div className="grid grid-cols-3 gap-2 text-center">
-                    <div className="p-3 rounded-lg border border-border bg-border/20">
-                      <div className="text-lg font-semibold text-charcoal">
-                        89%
-                      </div>
-                      <div className="text-[11px] text-muted-foreground">
-                        Avg. Comprehension
-                      </div>
-                    </div>
-                    <div className="p-3 rounded-lg border border-border bg-border/20">
-                      <div className="text-lg font-semibold text-charcoal">
-                        12
-                      </div>
-                      <div className="text-[11px] text-muted-foreground">
-                        Completed ICFs
-                      </div>
-                    </div>
-                    <div className="p-3 rounded-lg border border-border bg-border/20">
-                      <div className="text-lg font-semibold text-destructive">
-                        2
-                      </div>
-                      <div className="text-[11px] text-muted-foreground">
-                        Nurse Escalations
-                      </div>
-                    </div>
+                  <div className="grid grid-cols-3 gap-2 text-center text-sm">
+                    {["Documents", "Reviews", "Follow-ups"].map((label) => <div key={label} className="p-3 rounded-lg border border-border bg-border/20">{label}</div>)}
                   </div>
 
                   <ul className="space-y-2.5 text-sm text-charcoal">
                     <li className="flex items-start gap-2.5">
                       <FileText className="w-4 h-4 text-charcoal shrink-0 mt-0.5" />
                       <span>
-                        ICF PDF upload with readability scoring & section
-                        analysis
+                        ICF PDF upload, section extraction and version management
                       </span>
                     </li>
                     <li className="flex items-start gap-2.5">
@@ -315,8 +251,7 @@ export default function LandingPage() {
                     <li className="flex items-start gap-2.5">
                       <Lock className="w-4 h-4 text-charcoal shrink-0 mt-0.5" />
                       <span>
-                        Audit-trail compliance export for clinical trials and
-                        hospital IRBs
+                        Downloadable understanding reports and follow-up history
                       </span>
                     </li>
                   </ul>
@@ -351,7 +286,7 @@ export default function LandingPage() {
                   </Link>
                   <span>•</span>
                   <Link
-                    to="/dashboard/sessions/mock-session-1/report"
+                    to="/dashboard/sessions"
                     className="underline hover:text-charcoal"
                   >
                     Understanding Report
@@ -366,7 +301,7 @@ export default function LandingPage() {
         <section className="max-w-6xl mx-auto px-6 py-16">
           <div className="border-t border-border pt-12">
             <h2 className="text-xs uppercase tracking-wider text-muted-foreground font-semibold mb-8 text-center">
-              Core Design & Clinical Compliance Pillars
+              Designed for Clearer Conversations
             </h2>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
               <div className="space-y-2">
@@ -426,7 +361,7 @@ export default function LandingPage() {
               Dashboard
             </Link>
             <Link
-              to="/session/mock-session-1"
+              to="/patient"
               className="hover:text-charcoal transition-colors"
             >
               Patient Portal
