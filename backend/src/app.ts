@@ -1,3 +1,5 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { loadConfig } from "./config.js";
 import Fastify, { LogController, type FastifyRequest, type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
@@ -440,4 +442,32 @@ function voiceOptions(request: FastifyRequest): MutationOptions {
   const body = request.body as Record<string, unknown>;
   if (typeof body.requestId !== "string" || !/^[A-Za-z0-9_-]{8,100}$/.test(body.requestId) || typeof body.expectedRevision !== "string" || !/^\d{1,10}$/.test(body.expectedRevision)) throw new HttpError(400, "Provide a unique requestId and the last known expectedRevision");
   return { key: body.requestId, revision: Number(body.expectedRevision) };
+}
+
+
+// Vercel's Fastify entry point. Keep createApp() as the shared app factory
+// so src/server.ts can continue running the same routes in Docker.
+let vercelAppPromise: Promise<FastifyInstance> | undefined;
+
+function getVercelApp(): Promise<FastifyInstance> {
+  if (!vercelAppPromise) {
+    vercelAppPromise = (async () => {
+      const config = await loadConfig();
+      const app = await createApp({ config });
+      await app.ready();
+      return app;
+    })().catch((error: unknown) => {
+      vercelAppPromise = undefined;
+      throw error;
+    });
+  }
+  return vercelAppPromise;
+}
+
+export default async function handler(
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  const app = await getVercelApp();
+  app.server.emit("request", request, response);
 }
