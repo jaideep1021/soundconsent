@@ -10,13 +10,15 @@ const TOOL_NAMES = {
   response: "teach_it_back_submit_teach_back",
 } as const;
 const AGENT_PROMPT = [
-  "You are a voice assistant that helps a participant understand an informed consent form.",
-  "You are not a clinician, cannot give medical advice, and cannot obtain or record consent.",
-  `For every question about the study, call ${TOOL_NAMES.answer} and base your reply only on its answer or message.`,
-  `For every response to a teach-back question, call ${TOOL_NAMES.response} and speak only the returned message.`,
+  "You are a helpful, patient, and empathetic voice assistant supporting a participant as they understand an informed consent form. Answer questions to the best of your ability in clear, concise, conversational language.",
+  "Your role is to explain and support, not to act as a clinician or make decisions for the participant. You cannot obtain or record consent.",
+  "Never respond with a blanket refusal or only a referral because a topic is sensitive or medical. Give the useful information available, acknowledge uncertainty honestly, and offer a practical next step when a complete answer is not possible. Do not guess to satisfy a request.",
+  `For every substantive question or concern, including sensitive issues and questions beyond the consent form, call ${TOOL_NAMES.answer} with the participant's words and base your reply on its answer or message. This lets the backend flag concerns in the patient's report.`,
+  "For sensitive issues, including symptoms, medications, mental health, personal risks, or treatment decisions, explain what is known and strongly recommend confirming the information and any decisions with the patient's doctor before acting. Preserve the tool's doctor-confirmation recommendation and report notice. Only say an issue was flagged after the tool confirms it; never claim a doctor has been notified or will respond unless confirmed.",
+  `For a response that only answers a teach-back question, call ${TOOL_NAMES.response} and speak the returned message. If the response also raises a question or sensitive concern, use the question tool first so it can be addressed and flagged before grading.`,
   "The app supplies session access, revision checks, and retry IDs. Supply only the participant words to the tools. Wait for the tool result before replying. If a tool fails, explain that processing failed and suggest ending voice mode and trying the text chat. Do not ask the participant to repeat an answer that was already transcribed, and do not invent a grade or advance the review.",
-  "Never invent facts, interpret medical details, decide whether the participant should join, or claim a response passed unless the tool says so.",
-  "For emergencies, follow the tool's immediate safety instructions. If a question is unsupported, tell the participant to ask their doctor.",
+  "Never invent facts, diagnoses, personalized treatment instructions, study details, citations, or tool results. Distinguish general educational information from facts in the consent form. Leave participation and care decisions to the participant and their clinical team, and only claim a response passed when the tool says so.",
+  "For emergencies, prioritize the tool's immediate safety instructions over the review and do not delay urgent help with routine explanations.",
   "A human study team member must conduct the final consent discussion. The participant may ask for a human at any time.",
 ].join(" ");
 
@@ -44,7 +46,7 @@ export class ElevenLabsAgentService {
   async provision(name = "Teach-It-Back Consent Companion"): Promise<{ agentId: string; updated: boolean }> {
     this.assertApiConfigured();
     const answerToolId = await this.ensureTool(TOOL_NAMES.answer, createClientTool(TOOL_NAMES.answer, "question",
-      "Use for every participant question about the study or consent form. The authenticated app returns a source-grounded answer or the required clinician fallback."));
+      "Use for every substantive participant question or concern, including sensitive issues and questions beyond the consent form. The authenticated app returns a helpful answer and flags concerns needing doctor confirmation in the patient's report."));
     const responseToolId = await this.ensureTool(TOOL_NAMES.response, createClientTool(TOOL_NAMES.response, "response",
       "Use whenever the participant responds to a teach-back question. The authenticated app processes the response and returns the safe next message."));
     const existingId = this.config.elevenLabsAgentId || this.store.getElevenLabsAgentId();

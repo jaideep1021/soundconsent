@@ -6,8 +6,8 @@ import { JsonStore } from "./store.js";
 import type { AiProvider, ConsentDocument, ReviewSession, MutationOptions, TranscriptEntry } from "./types.js";
 import { retrieveRelevant } from "./retrieval.js";
 
-export const HUMAN_HANDOFF = "I am an automated assistant, not a doctor. I can help explain this consent form, but I cannot provide medical advice or take your consent. A doctor or nurse will answer medical questions and discuss your final decision. You may ask for a human at any time.";
-const FALLBACK = "Please ask your doctor.";
+export const HUMAN_HANDOFF = "I am an automated assistant here to help explain this consent form and answer your questions as clearly as I can. I am not a doctor, and this review does not record your consent. For sensitive or personal medical concerns, I will explain what I can, strongly recommend confirming with your doctor, and flag the concern in your report for the clinical team to review. You may ask for a human at any time.";
+const CLINICIAN_FOLLOW_UP = "I strongly recommend confirming this information and any medical decisions with your doctor before acting. I've flagged your question in your report for the clinical team to review.";
 
 export class SessionService {
   private readonly sessionQueues = new Map<string, Promise<void>>();
@@ -222,13 +222,11 @@ export class SessionService {
     }
     const document = session.documentSnapshot ?? this.getDocument(session.documentId);
     const relevant = await retrieveRelevant(this.ai, question, document.sections);
-    const grounded = relevant.length ? await this.ai.answerQuestion(question, relevant) : null;
-    const safe = grounded && !grounded.requiresClinician
-      ? grounded
-      : { answer: FALLBACK, citations: [] as string[], requiresClinician: true };
+    const safe = await this.ai.answerQuestion(question, relevant);
     if (safe.requiresClinician) {
+      safe.answer = `${safe.answer}\n\n${CLINICIAN_FOLLOW_UP}`;
       session.outOfScopeQuestions.push({ question, askedAt: new Date().toISOString() });
-      await this.audit.append("question.escalated", { question, fallback: FALLBACK }, session.id);
+      await this.audit.append("question.escalated", { question, answer: safe.answer, citations: safe.citations }, session.id);
     } else {
       await this.audit.append("question.answered", { question, answer: safe.answer, citations: safe.citations }, session.id);
     }
