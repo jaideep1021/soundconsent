@@ -1,136 +1,217 @@
-import { create } from 'zustand';
-import type { SessionData, Message } from '@/types/session';
-
+import { create } from "zustand";
+import { persist, createJSONStorage } from "zustand/middleware";
+import type { SessionData, Message } from "@/types/session";
+import { demoSessions, makeSession } from "@/data/demo-sessions";
+import { normalizeName, newSessionSchema } from "@/lib/validators";
+import { useDocumentStore } from "./document-store";
 interface SessionState {
+  records: SessionData[];
   session: SessionData | null;
-  isLoading: boolean;
+  verifiedSessionId: string | null;
   error: string | null;
-  isAiTyping: boolean;
-  
-  initializeSession: (sessionId: string) => Promise<void>;
+  initializeSession: (id: string) => void;
   verifyIdentity: (name: string, dob: string) => boolean;
-  setMode: (mode: 'chat' | 'voice') => void;
-  addMessage: (message: Omit<Message, 'id' | 'timestamp'>) => void;
-  setAiTyping: (isTyping: boolean) => void;
-  completeCurrentSection: (assessment?: string, nextSectionId?: string) => void;
-  completeSession: () => void;
+  createSession: (data: {
+    patientName: string;
+    dateOfBirth: string;
+    documentId: string;
+  }) => string;
+  updateRecord: (
+    id: string,
+    patch: Partial<
+      Pick<SessionData, "flagged" | "followUpAt" | "acknowledgedAt">
+    >,
+  ) => void;
+  setMode: (mode: "chat" | "voice") => void;
+  startReview: () => void;
+  addMessage: (message: Pick<Message, "role" | "content">) => void;
+  advanceSection: () => void;
+  completeSession: (signature: string) => boolean;
 }
-
-// Mock initial data
-const MOCK_SESSION: SessionData = {
-  id: 'mock-session-1',
-  patientName: 'Jane Doe',
-  procedureName: 'Lumbar Puncture',
-  dateOfBirth: '1980-05-15',
-  mode: 'chat',
-  status: 'pending',
-  messages: [],
-  sections: [
-    { id: 's1', title: 'Procedure Overview', status: 'pending' },
-    { id: 's2', title: 'Risks and Side Effects', status: 'pending' },
-    { id: 's3', title: 'Alternatives', status: 'pending' },
-    { id: 's4', title: 'Recovery and Aftercare', status: 'pending' },
-  ],
-};
-
-export const useSessionStore = create<SessionState>((set, get) => ({
-  session: null,
-  isLoading: false,
-  error: null,
-  isAiTyping: false,
-
-  initializeSession: async (sessionId: string) => {
-    set({ isLoading: true, error: null });
-    // In a real app, fetch from API
-    setTimeout(() => {
-      set({ session: { ...MOCK_SESSION, id: sessionId }, isLoading: false });
-    }, 800);
-  },
-
-  verifyIdentity: (name: string, dob: string) => {
-    const { session } = get();
-    if (!session) return false;
-    
-    // Simple mock verification
-    if (name.toLowerCase() === session.patientName.toLowerCase() && dob === session.dateOfBirth) {
-      set({ session: { ...session, status: 'in-progress' } });
-      return true;
-    }
-    return false;
-  },
-
-  setMode: (mode: 'chat' | 'voice') => {
-    const { session } = get();
-    if (session) {
-      set({ session: { ...session, mode } });
-    }
-  },
-
-  addMessage: (msg) => {
-    const { session } = get();
-    if (!session) return;
-    
-    const newMessage: Message = {
-      ...msg,
-      id: Math.random().toString(36).substring(7),
-      timestamp: new Date(),
-    };
-    
-    set({
-      session: {
-        ...session,
-        messages: [...session.messages, newMessage],
-      },
-    });
-  },
-
-  setAiTyping: (isTyping: boolean) => {
-    set({ isAiTyping: isTyping });
-  },
-
-  completeCurrentSection: (assessment?: string, nextSectionId?: string) => {
-    const { session } = get();
-    if (!session) return;
-
-    const currentSectionIndex = session.sections.findIndex(s => s.status === 'active');
-    if (currentSectionIndex === -1) {
-      // Set first pending to active
-      const nextPendingIndex = session.sections.findIndex(s => s.status === 'pending');
-      if (nextPendingIndex !== -1) {
-        const newSections = [...session.sections];
-        newSections[nextPendingIndex] = { ...newSections[nextPendingIndex], status: 'active' };
-        set({ session: { ...session, sections: newSections } });
-      }
-      return;
-    }
-
-    const newSections = [...session.sections];
-    newSections[currentSectionIndex] = {
-      ...newSections[currentSectionIndex],
-      status: 'completed',
-      aiAssessment: assessment,
-    };
-
-    if (nextSectionId) {
-      const nextIndex = newSections.findIndex(s => s.id === nextSectionId);
-      if (nextIndex !== -1) {
-        newSections[nextIndex] = { ...newSections[nextIndex], status: 'active' };
-      }
-    } else {
-      // Find next pending
-      const nextPendingIndex = newSections.findIndex(s => s.status === 'pending');
-      if (nextPendingIndex !== -1) {
-        newSections[nextPendingIndex] = { ...newSections[nextPendingIndex], status: 'active' };
-      }
-    }
-
-    set({ session: { ...session, sections: newSections } });
-  },
-
-  completeSession: () => {
-    const { session } = get();
-    if (session) {
-      set({ session: { ...session, status: 'completed' } });
-    }
-  },
-}));
+export const useSessionStore = create<SessionState>()(
+  persist(
+    (set, get) => {
+      const commit = (session: SessionData) =>
+        set((state) => ({
+          session,
+          records: state.records.map((s) =>
+            s.id === session.id ? session : s,
+          ),
+        }));
+      return {
+        records: demoSessions,
+        session: null,
+        verifiedSessionId: null,
+        error: null,
+        initializeSession: (id) => {
+          if (get().session?.id === id) return;
+          const session = get().records.find((s) => s.id === id) ?? null;
+          set({
+            session,
+            verifiedSessionId: null,
+            error: session
+              ? null
+              : "This demo session is unavailable. Ask your coordinator for a new link.",
+          });
+        },
+        verifyIdentity: (name, dob) => {
+          const session = get().session;
+          if (
+            !session ||
+            normalizeName(name) !== normalizeName(session.patientName) ||
+            dob !== session.dateOfBirth
+          )
+            return false;
+          set({ verifiedSessionId: session.id });
+          if (session.status === "pending")
+            commit({ ...session, status: "in-progress" });
+          return true;
+        },
+        createSession: (data) => {
+          const validated = newSessionSchema.parse(data);
+          const document = useDocumentStore
+            .getState()
+            .documents.find(
+              (d) =>
+                d.id === validated.documentId &&
+                d.status === "Active" &&
+                d.sections.length > 0,
+            );
+          if (!document)
+            throw new Error("Select an active document with sections.");
+          const id = crypto.randomUUID();
+          const session = makeSession(
+            id,
+            validated.patientName,
+            validated.dateOfBirth,
+            document.title,
+            document.sections,
+          );
+          set((state) => ({ records: [session, ...state.records] }));
+          return id;
+        },
+        updateRecord: (id, patch) =>
+          set((state) => ({
+            records: state.records.map((s) =>
+              s.id === id ? { ...s, ...patch } : s,
+            ),
+            session:
+              state.session?.id === id
+                ? { ...state.session, ...patch }
+                : state.session,
+          })),
+        setMode: (mode) => {
+          const s = get().session;
+          if (s) commit({ ...s, mode });
+        },
+        startReview: () => {
+          const s = get().session;
+          if (
+            !s ||
+            get().verifiedSessionId !== s.id ||
+            s.status === "completed" ||
+            s.sections.some((s) => s.status === "active")
+          )
+            return;
+          const first = s.sections.find((s) => s.status === "pending");
+          if (first)
+            commit({
+              ...s,
+              sections: s.sections.map((s) =>
+                s.id === first.id ? { ...s, status: "active" } : s,
+              ),
+            });
+        },
+        addMessage: (message) => {
+          const s = get().session;
+          const active = s?.sections.find((s) => s.status === "active");
+          if (
+            !s ||
+            !active ||
+            get().verifiedSessionId !== s.id ||
+            s.status === "completed"
+          )
+            return;
+          commit({
+            ...s,
+            messages: [
+              ...s.messages,
+              {
+                ...message,
+                id: crypto.randomUUID(),
+                timestamp: new Date().toISOString(),
+                sectionId: active.id,
+              },
+            ],
+            sections: s.sections.map((section) =>
+              section.id === active.id && message.role === "patient"
+                ? {
+                    ...section,
+                    patientResponse: [section.patientResponse, message.content]
+                      .filter(Boolean)
+                      .join("\n"),
+                  }
+                : section,
+            ),
+          });
+        },
+        advanceSection: () => {
+          const s = get().session;
+          if (
+            !s ||
+            get().verifiedSessionId !== s.id ||
+            s.status === "completed"
+          )
+            return;
+          const active = s.sections.find((s) => s.status === "active");
+          if (!active?.patientResponse) return;
+          const next = s.sections.find((s) => s.status === "pending");
+          commit({
+            ...s,
+            flagged: true,
+            sections: s.sections.map((section) =>
+              section.id === active.id
+                ? {
+                    ...section,
+                    status: "needs-review",
+                    aiAssessment:
+                      "Response recorded in demo mode; understanding has not been evaluated.",
+                  }
+                : section.id === next?.id
+                  ? { ...section, status: "active" }
+                  : section,
+            ),
+          });
+        },
+        completeSession: (signature) => {
+          const s = get().session;
+          if (
+            !s ||
+            get().verifiedSessionId !== s.id ||
+            s.status === "completed" ||
+            !s.sections.length ||
+            s.sections.some(
+              (s) => s.status === "pending" || s.status === "active",
+            ) ||
+            normalizeName(signature) !== normalizeName(s.patientName)
+          )
+            return false;
+          commit({
+            ...s,
+            status: "completed",
+            signature: {
+              name: signature.trim().replace(/\s+/g, " "),
+              signedAt: new Date().toISOString(),
+              acknowledged: true,
+            },
+          });
+          return true;
+        },
+      };
+    },
+    {
+      name: "demo-sessions-v1",
+      storage: createJSONStorage(() => sessionStorage),
+    },
+  ),
+);

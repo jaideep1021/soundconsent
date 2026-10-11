@@ -1,96 +1,109 @@
-import { createBrowserRouter } from 'react-router';
-import { DashboardLayout } from '@/components/layout/dashboard-layout';
-import { PatientLayout } from '@/components/layout/patient-layout';
-
-import LandingPage from '@/pages/landing';
-import LoginPage from '@/pages/login';
-import DashboardHome from '@/pages/dashboard/index';
-import DocumentsPage from '@/pages/dashboard/documents/index';
-import DocumentDetail from '@/pages/dashboard/documents/[id]';
-import SessionsPage from '@/pages/dashboard/sessions/index';
-import NewSessionPage from '@/pages/dashboard/sessions/new';
-import SessionDetail from '@/pages/dashboard/sessions/[id]/index';
-import UnderstandingReportPage from '@/pages/dashboard/sessions/[id]/report';
-import SettingsPage from '@/pages/dashboard/settings';
-
-import IdentityVerificationPage from '@/pages/session/index';
-import SessionOverviewPage from '@/pages/session/overview';
-import SessionChatPage from '@/pages/session/chat';
-import SessionVoicePage from '@/pages/session/voice';
-import SessionSummaryPage from '@/pages/session/summary';
-
+import { Suspense, lazy, type ComponentType } from "react";
+import { createBrowserRouter } from "react-router";
+import { PatientLayout } from "@/components/layout/patient-layout";
+import { ProtectedRoute, SessionRoute } from "@/components/shared/route-guards";
+import { LoadingSkeleton } from "@/components/shared/loading-skeleton";
+import { ErrorFallback } from "@/components/shared/error-boundary";
+import { NotFound } from "@/components/shared/not-found";
+function page(load: () => Promise<{ default: ComponentType }>) {
+  const Page = lazy(load);
+  return (
+    <Suspense fallback={<LoadingSkeleton />}>
+      <Page />
+    </Suspense>
+  );
+}
 export const router = createBrowserRouter([
   {
-    path: '/',
-    element: <LandingPage />,
-  },
-  {
-    path: '/login',
-    element: <LoginPage />,
-  },
-  {
-    path: '/dashboard',
-    element: <DashboardLayout />,
+    errorElement: <ErrorFallback />,
     children: [
+      { path: "/", element: page(() => import("@/pages/landing")) },
+      { path: "/login", element: page(() => import("@/pages/login")) },
       {
-        index: true,
-        element: <DashboardHome />,
+        element: <ProtectedRoute />,
+        children: [
+          {
+            path: "/dashboard",
+            element: page(() =>
+              import("@/components/layout/dashboard-layout").then((m) => ({
+                default: m.DashboardLayout,
+              })),
+            ),
+            children: [
+              {
+                index: true,
+                element: page(() => import("@/pages/dashboard/index")),
+              },
+              {
+                path: "documents",
+                element: page(
+                  () => import("@/pages/dashboard/documents/index"),
+                ),
+              },
+              {
+                path: "documents/:id",
+                element: page(() => import("@/pages/dashboard/documents/[id]")),
+              },
+              {
+                path: "sessions",
+                element: page(() => import("@/pages/dashboard/sessions/index")),
+              },
+              {
+                path: "sessions/new",
+                element: page(() => import("@/pages/dashboard/sessions/new")),
+              },
+              {
+                path: "sessions/:id",
+                element: page(
+                  () => import("@/pages/dashboard/sessions/[id]/index"),
+                ),
+              },
+              {
+                path: "sessions/:id/report",
+                element: page(
+                  () => import("@/pages/dashboard/sessions/[id]/report"),
+                ),
+              },
+              {
+                path: "settings",
+                element: page(() => import("@/pages/dashboard/settings")),
+              },
+            ],
+          },
+        ],
       },
       {
-        path: 'documents',
-        element: <DocumentsPage />,
+        path: "/session/:sessionId",
+        element: <PatientLayout />,
+        children: [
+          {
+            element: <SessionRoute />,
+            children: [
+              {
+                index: true,
+                element: page(() => import("@/pages/session/index")),
+              },
+              {
+                path: "overview",
+                element: page(() => import("@/pages/session/overview")),
+              },
+              {
+                path: "chat",
+                element: page(() => import("@/pages/session/chat")),
+              },
+              {
+                path: "voice",
+                element: page(() => import("@/pages/session/voice")),
+              },
+              {
+                path: "summary",
+                element: page(() => import("@/pages/session/summary")),
+              },
+            ],
+          },
+        ],
       },
-      {
-        path: 'documents/:id',
-        element: <DocumentDetail />,
-      },
-      {
-        path: 'sessions',
-        element: <SessionsPage />,
-      },
-      {
-        path: 'sessions/new',
-        element: <NewSessionPage />,
-      },
-      {
-        path: 'sessions/:id',
-        element: <SessionDetail />,
-      },
-      {
-        path: 'sessions/:id/report',
-        element: <UnderstandingReportPage />,
-      },
-      {
-        path: 'settings',
-        element: <SettingsPage />,
-      },
-    ],
-  },
-  {
-    path: '/session/:sessionId',
-    element: <PatientLayout />,
-    children: [
-      {
-        index: true,
-        element: <IdentityVerificationPage />,
-      },
-      {
-        path: 'overview',
-        element: <SessionOverviewPage />,
-      },
-      {
-        path: 'chat',
-        element: <SessionChatPage />,
-      },
-      {
-        path: 'voice',
-        element: <SessionVoicePage />,
-      },
-      {
-        path: 'summary',
-        element: <SessionSummaryPage />,
-      },
+      { path: "*", element: <NotFound /> },
     ],
   },
 ]);
-

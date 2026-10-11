@@ -1,11 +1,14 @@
-import React from 'react';
+import React from "react";
 
 interface SuggestionChipsProps {
   suggestions: string[];
   onSelect: (suggestion: string) => void;
 }
 
-export const SuggestionChips: React.FC<SuggestionChipsProps> = ({ suggestions, onSelect }) => {
+export const SuggestionChips: React.FC<SuggestionChipsProps> = ({
+  suggestions,
+  onSelect,
+}) => {
   if (!suggestions.length) return null;
 
   return (
@@ -14,7 +17,7 @@ export const SuggestionChips: React.FC<SuggestionChipsProps> = ({ suggestions, o
         <button
           key={index}
           onClick={() => onSelect(suggestion)}
-          className="whitespace-nowrap px-4 py-2 rounded-full border border-[#eceae4] bg-[#f7f4ed] hover:border-[rgba(28,28,28,0.4)] text-sm text-[#1c1c1c] transition-colors focus:outline-none focus:ring-1 focus:ring-[#1c1c1c]"
+          className="min-h-11 whitespace-nowrap px-4 py-2 rounded-full border border-border bg-cream hover:border-border-interactive text-sm text-charcoal transition-colors focus:outline-none focus:ring-1 focus:ring-charcoal"
         >
           {suggestion}
         </button>

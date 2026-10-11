@@ -1,76 +1,183 @@
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { ArrowLeft, Save, FileText, CheckCircle2 } from 'lucide-react';
-import { useNavigate } from 'react-router';
-
-export default function DocumentDetail() {
-  const navigate = useNavigate();
-
-  // Mock data for the sections
-  const sections = [
-    { id: 1, title: 'Introduction', content: 'This form asks for your consent to have a total knee replacement surgery.' },
-    { id: 2, title: 'Risks and Side Effects', content: 'Possible risks include infection, blood clots, and joint stiffness.' },
-    { id: 3, title: 'Alternatives', content: 'Alternatives include physical therapy, medication, or no treatment.' },
-  ];
-
+import { useState } from "react";
+import { Link, useParams } from "react-router";
+import { useDocumentStore } from "@/stores/document-store";
+import type { ConsentDocument } from "@/data/demo-documents";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { NotFound } from "@/components/shared/not-found";
+import { toast } from "sonner";
+function DocumentEditor({ document }: { document: ConsentDocument }) {
+  const [draft, setDraft] = useState(() => structuredClone(document));
+  const [error, setError] = useState("");
+  const updateSection = (
+    id: string,
+    field: "title" | "content",
+    value: string,
+  ) =>
+    setDraft((d) => ({
+      ...d,
+      sections: d.sections.map((s) =>
+        s.id === id ? { ...s, [field]: value } : s,
+      ),
+    }));
+  const move = (index: number, offset: number) =>
+    setDraft((d) => {
+      const sections = [...d.sections];
+      [sections[index], sections[index + offset]] = [
+        sections[index + offset],
+        sections[index],
+      ];
+      return { ...d, sections };
+    });
   return (
-    <div className="space-y-12 max-w-4xl">
-      {/* Header */}
-      <div className="space-y-6">
-        <Button 
-          variant="ghost" 
-          className="text-[#5f5f5d] hover:text-[#1c1c1c] hover:bg-[#1c1c1c]/[0.04] p-0 h-auto"
-          onClick={() => navigate(-1)}
-        >
-          <ArrowLeft className="w-4 h-4 mr-2" />
-          Back to Documents
-        </Button>
-        
-        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-3 mb-2">
-              <Badge variant="default" className="rounded-full px-2.5 py-0.5 font-[400] bg-green-100 text-green-800 hover:bg-green-100">
-                <CheckCircle2 className="w-3 h-3 mr-1" /> AI Parsed
-              </Badge>
-              <span className="text-sm text-[#5f5f5d]">Last edited today at 10:45 AM</span>
-            </div>
-            <h1 className="text-[48px] leading-[1] font-[600] text-[#1c1c1c] tracking-[-1.2px]">Total Knee Arthroplasty</h1>
-            <p className="text-lg text-[#5f5f5d] mt-2 flex items-center gap-2">
-              <FileText className="w-4 h-4" />
-              Source: knee-replacement-v2.pdf
-            </p>
-          </div>
-          <Button 
-            className="bg-[#1c1c1c] text-[#fcfbf8] hover:bg-[#1c1c1c]/90 shadow-[rgba(255,255,255,0.2)_0px_0.5px_0px_0px_inset,rgba(0,0,0,0.2)_0px_0px_0px_0.5px_inset,rgba(0,0,0,0.05)_0px_1px_2px_0px]"
-          >
-            <Save className="w-4 h-4 mr-2" />
-            Save Changes
-          </Button>
+    <div className="space-y-8 max-w-4xl">
+      <Link className="underline" to="/dashboard/documents">
+        Back to Documents
+      </Link>
+      <h1 className="text-4xl font-semibold">Edit Document</h1>
+      <p className="text-muted-foreground break-all">
+        Source: {document.source}
+      </p>
+      <form
+        className="space-y-6"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (
+            !draft.title.trim() ||
+            draft.sections.some((s) => !s.title.trim() || !s.content.trim()) ||
+            (draft.status === "Active" && !draft.sections.length)
+          ) {
+            setError(
+              "Enter a document title and a title and content for each section. Active documents need at least one section.",
+            );
+            return;
+          }
+          useDocumentStore
+            .getState()
+            .save({ ...draft, title: draft.title.trim() });
+          setError("");
+          toast.success("Document saved in this tab.");
+        }}
+      >
+        <div className="space-y-2">
+          <label htmlFor="document-title">Document title</label>
+          <Input
+            id="document-title"
+            maxLength={160}
+            value={draft.title}
+            onChange={(e) => setDraft({ ...draft, title: e.target.value })}
+          />
         </div>
-      </div>
-
-      {/* Sections List */}
-      <div className="space-y-6">
-        <h2 className="text-[20px] leading-[1.25] font-[400] text-[#1c1c1c]">Extracted Sections</h2>
-        <div className="space-y-4">
-          {sections.map((section, index) => (
-            <div key={section.id} className="border border-[#eceae4] rounded-xl bg-[#f7f4ed] p-6 hover:border-[#1c1c1c]/[0.4] transition-colors">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-3">
-                  <span className="flex items-center justify-center w-6 h-6 rounded-full bg-[#1c1c1c]/[0.04] text-sm font-[600] text-[#1c1c1c]">
-                    {index + 1}
-                  </span>
-                  <h3 className="text-[18px] leading-[1.38] font-[600] text-[#1c1c1c]">{section.title}</h3>
-                </div>
-                <Button variant="ghost" size="sm" className="text-[#5f5f5d] hover:text-[#1c1c1c] hover:bg-[#1c1c1c]/[0.04]">
-                  Edit
+        <div className="space-y-2">
+          <label htmlFor="document-status">Status</label>
+          <select
+            id="document-status"
+            className="block h-11 border rounded-standard bg-cream px-3"
+            value={draft.status}
+            onChange={(e) =>
+              setDraft({
+                ...draft,
+                status: e.target.value as ConsentDocument["status"],
+              })
+            }
+          >
+            {["Active", "Draft", "Archived"].map((s) => (
+              <option key={s}>{s}</option>
+            ))}
+          </select>
+        </div>
+        <h2 className="text-xl font-semibold">Sections</h2>
+        {!draft.sections.length && (
+          <p className="text-muted-foreground">
+            No sections yet. Add content manually; PDF extraction is not
+            connected.
+          </p>
+        )}
+        {draft.sections.map((section, index) => (
+          <details key={section.id} className="border rounded-xl p-4" open>
+            <summary className="min-h-11 cursor-pointer font-semibold">
+              {index + 1}. {section.title || "Untitled section"}
+            </summary>
+            <div className="space-y-3 pt-3">
+              <label className="block" htmlFor={`title-${section.id}`}>
+                Section title
+              </label>
+              <Input
+                id={`title-${section.id}`}
+                value={section.title}
+                onChange={(e) =>
+                  updateSection(section.id, "title", e.target.value)
+                }
+              />
+              <label className="block" htmlFor={`content-${section.id}`}>
+                Content
+              </label>
+              <textarea
+                id={`content-${section.id}`}
+                className="w-full min-h-32 border bg-cream rounded-standard p-3 focus-visible:ring-2 focus-visible:ring-ring"
+                value={section.content}
+                onChange={(e) =>
+                  updateSection(section.id, "content", e.target.value)
+                }
+              />
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={index === 0}
+                  aria-label={`Move ${section.title} up`}
+                  onClick={() => move(index, -1)}
+                >
+                  Move up
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={index === draft.sections.length - 1}
+                  aria-label={`Move ${section.title} down`}
+                  onClick={() => move(index, 1)}
+                >
+                  Move down
                 </Button>
               </div>
-              <p className="text-[#1c1c1c]/[0.82] text-[16px] leading-[1.5]">{section.content}</p>
             </div>
-          ))}
+          </details>
+        ))}
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() =>
+            setDraft((d) => ({
+              ...d,
+              sections: [
+                ...d.sections,
+                { id: crypto.randomUUID(), title: "", content: "" },
+              ],
+            }))
+          }
+        >
+          Add Section
+        </Button>
+        {error && (
+          <p role="alert" className="text-destructive">
+            {error}
+          </p>
+        )}
+        <div>
+          <Button type="submit">Save Changes</Button>
         </div>
-      </div>
+      </form>
     </div>
+  );
+}
+export default function DocumentDetail() {
+  const { id } = useParams();
+  const document = useDocumentStore((s) =>
+    s.documents.find((d) => d.id === id),
+  );
+  return document ? (
+    <DocumentEditor key={document.id} document={document} />
+  ) : (
+    <NotFound title="Document not found" />
   );
 }

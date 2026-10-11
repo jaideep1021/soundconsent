@@ -13,3 +13,28 @@
     @apply font-sans;
   }
 }
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+@media print {
+  [data-dashboard-shell],
+  [data-dashboard-main] {
+    height: auto !important;
+    overflow: visible !important;
+  }
+  [data-dashboard-shell] > aside,
+  [data-dashboard-header],
+  [data-demo-banner] {
+    display: none !important;
+  }
+  details > * {
+    display: block !important;
+  }
+}

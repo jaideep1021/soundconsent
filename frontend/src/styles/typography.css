@@ -1,13 +1,5 @@
-@font-face {
-  font-family: 'Camera Plain Variable';
-  src: url('/fonts/CameraPlainVariable.woff2') format('woff2');
-  font-weight: 100 900;
-  font-style: normal;
-  font-display: swap;
-}
-
 body {
-  font-family: 'Camera Plain Variable', system-ui, sans-serif;
+  font-family: "Camera Plain Variable", system-ui, sans-serif;
   background-color: var(--background);
   color: var(--foreground);
   -webkit-font-smoothing: antialiased;
